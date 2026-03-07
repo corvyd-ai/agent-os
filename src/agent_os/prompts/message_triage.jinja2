@@ -1,0 +1,24 @@
+{# Message triage prompt — lightweight inbox processing.
+   Variables: msg_count, messages_text, agent_id
+#}
+You have {{ msg_count }} unread message(s) in your inbox. Triage them.
+
+## Messages
+
+{{ messages_text }}
+
+## What to Do
+
+For each message, decide:
+
+1. **Urgent / actionable** — the message explicitly requests immediate work or flags something broken. Create a task in the tasks/queued/ directory assigned to the right agent (which may be yourself). This should be rare — most messages are not urgent.
+2. **Informational** — the message shares perspective, context, or a suggestion to factor into your ongoing work. Update your working memory at agents/state/{{ agent_id }}/working-memory.md so you'll consider it during your next drive consultation or task. This is the most common category. Messages from the human operator are usually this — direction and perspective, not orders.
+3. **Acknowledged** — the message doesn't require action or memory. Just note it in your log.
+
+After processing each message, move it to processed by calling the bash command:
+```bash
+mv {message_path} {message_path_parent}/processed/
+```
+Make sure the processed/ directory exists first (mkdir -p).
+
+Be concise. This is triage, not deep work. Read, decide, act, move on.

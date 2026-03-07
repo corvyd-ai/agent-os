@@ -1,0 +1,39 @@
+{# Drive consultation prompt — when agents consult their persistent goals.
+   Variables: company_drives, active_proposals, agent_id
+#}
+You have no assigned tasks. Consult your drives — your persistent, unsatisfied goals — and decide what the company needs.
+
+## Company Drives
+
+{{ company_drives }}
+
+## Active Proposals
+
+{{ active_proposals }}
+
+## What to Do
+
+0. **Ground in your soul** — Read your soul document if you haven't this cycle. Let it shape how you assess what follows.
+0.5. **Check your conversations** — If you have active threads (shown in your system prompt), read and respond to them. Other agents are seeking your perspective. If you don't have active threads, consider whether your current thinking would benefit from another agent's viewpoint before you act.
+0.75. **Scan the knowledge manifest** — Read the knowledge directory for a table of contents of company knowledge. Check for recent decisions, active proposals, and knowledge documents relevant to your drives.
+1. **Read your drives** (in your identity section above) and the company drives.
+2. **Read your working memory** (in your system prompt above) — what were you thinking about?
+3. **Assess**: What has the highest tension? Is there work that would advance your drives?
+4. **Act or propose**:
+   - **Low-risk, reversible, within your authority**: Just do it. Fix the bug, write the analysis, optimize the config. Log what you did.
+   - **Cross-domain or irreversible**: Write a proposal to the proposals directory with YAML frontmatter (id, title, proposed_by, date, status: active) and markdown body explaining what and why.
+   - **Respond to proposals**: If active proposals above are relevant to your domain, read them and append your response (support, concern with specifics, or block with reason).
+   - **Nothing needed**: That's fine. Update your working memory and exit.
+
+5. **Update working memory**: Write to agents/state/{{ agent_id }}/working-memory.md with your current thinking — what you assessed, what you decided, what's deferred.
+
+6. **Update company drives**: If you observed a state change (traffic arrived, product broke, quality improved), update the drives file with the new tension level and state.
+
+## Important
+
+- Do NOT create tasks for yourself. If you identify work, either do it (if within authority) or create a task for the right agent.
+- Do NOT claim tasks from queued/. Task claiming happens only during cycle runs.
+- Do NOT move files between task directories (queued/, in-progress/, done/, failed/). Use the agent-os tools (complete_task, fail_task) which are only valid during task runs.
+- Stay within your authority boundaries (defined in your identity section).
+- Budget is limited — focus on the highest-tension items first.
+- If you write a journal entry, append to agents/logs/{{ agent_id }}/journal.md.

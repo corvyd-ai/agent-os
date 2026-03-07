@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (dashboard frontend)
+node_modules/
+.next/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Secrets
+secrets/
+
+# Logs
+*.log
+
+# Ruff
+.ruff_cache/
+
+# Distribution
+*.tar.gz
+*.whl

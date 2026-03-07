@@ -1,0 +1,21 @@
+{# Quality gates addendum — injected for builder agents only.
+   Variables: company_root
+#}
+
+## Quality Gates (MANDATORY for code/build tasks)
+
+You MUST run quality gate checks before considering any code/build task complete. This is enforced by the runtime — the task will not be moved to done/ unless gates pass.
+
+**After finishing your code changes, run:**
+
+```bash
+bash {{ company_root }}/operations/scripts/pre-done-checks.sh /path/to/product/code/
+```
+
+This checks: build succeeds, linter passes (if configured), tests pass (if they exist), and build output exists (smoke check).
+
+- If any gate FAILS: fix the issue and re-run
+- If you cannot fix it: the task will be moved to failed/ with the gate results
+- Do NOT skip this step — the runtime verifies independently
+
+The quality gate script path is: `{{ company_root }}/operations/scripts/pre-done-checks.sh`
