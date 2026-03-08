@@ -24,37 +24,46 @@ def _write_toml(path: Path, content: str) -> Path:
 
 class TestFromToml:
     def test_basic_company_fields(self, toml_dir):
-        toml = _write_toml(toml_dir, """
+        toml = _write_toml(
+            toml_dir,
+            """
 [company]
 name = "TestCo"
 root = "company"
-""")
+""",
+        )
         cfg = Config.from_toml(toml)
         assert cfg.company_name == "TestCo"
         assert cfg.company_root == toml_dir / "company"
 
     def test_runtime_model(self, toml_dir):
-        toml = _write_toml(toml_dir, """
+        toml = _write_toml(
+            toml_dir,
+            """
 [company]
 root = "company"
 
 [runtime]
 model = "claude-sonnet-4-6"
 builder_roles = ["Software Engineer", "DevOps"]
-""")
+""",
+        )
         cfg = Config.from_toml(toml)
         assert cfg.default_model == "claude-sonnet-4-6"
         assert cfg.builder_roles == frozenset({"Software Engineer", "DevOps"})
 
     def test_budget_overrides(self, toml_dir):
-        toml = _write_toml(toml_dir, """
+        toml = _write_toml(
+            toml_dir,
+            """
 [company]
 root = "company"
 
 [budget]
 task = 10.00
 dream = 3.00
-""")
+""",
+        )
         cfg = Config.from_toml(toml)
         assert cfg.max_budget_per_invocation_usd == 10.00
         assert cfg.dream_max_budget_usd == 3.00
@@ -62,31 +71,39 @@ dream = 3.00
         assert cfg.standing_orders_max_budget_usd == 2.00
 
     def test_role_tools(self, toml_dir):
-        toml = _write_toml(toml_dir, """
+        toml = _write_toml(
+            toml_dir,
+            """
 [company]
 root = "company"
 
 [roles]
 "Custom Role" = ["Read", "Write", "Bash"]
-""")
+""",
+        )
         cfg = Config.from_toml(toml)
         assert cfg.role_tools == {"Custom Role": ["Read", "Write", "Bash"]}
 
     def test_prompts_override_dir(self, toml_dir):
         prompts = toml_dir / "my-prompts"
         prompts.mkdir()
-        toml = _write_toml(toml_dir, """
+        toml = _write_toml(
+            toml_dir,
+            """
 [company]
 root = "company"
 
 [prompts]
 override_dir = "my-prompts"
-""")
+""",
+        )
         cfg = Config.from_toml(toml)
         assert cfg.prompts_override_dir == toml_dir / "my-prompts"
 
     def test_feedback_routing(self, toml_dir):
-        toml = _write_toml(toml_dir, """
+        toml = _write_toml(
+            toml_dir,
+            """
 [company]
 root = "company"
 
@@ -96,16 +113,20 @@ catch_all = "agent-000-steward"
 [feedback_routing.tags]
 dashboard = ["agent-001-maker"]
 strategy = ["agent-006-strategist"]
-""")
+""",
+        )
         cfg = Config.from_toml(toml)
         assert cfg.feedback_routing["catch_all"] == "agent-000-steward"
         assert cfg.feedback_routing["tags"]["dashboard"] == ["agent-001-maker"]
 
     def test_absolute_root(self, toml_dir):
-        toml = _write_toml(toml_dir, f"""
+        toml = _write_toml(
+            toml_dir,
+            f"""
 [company]
-root = "{toml_dir / 'company'}"
-""")
+root = "{toml_dir / "company"}"
+""",
+        )
         cfg = Config.from_toml(toml)
         assert cfg.company_root == toml_dir / "company"
 

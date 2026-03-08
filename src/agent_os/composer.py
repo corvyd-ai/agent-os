@@ -177,7 +177,9 @@ class PromptComposer:
 
             agent_id = agent_config.agent_id
             my_tags = tag_routing.get(agent_id, set())
-            is_catch_all = catch_all_id and agent_id.startswith(catch_all_id.split("-")[0] + "-" + catch_all_id.split("-")[1] if "-" in catch_all_id else catch_all_id)
+            is_catch_all = catch_all_id and agent_id.startswith(
+                catch_all_id.split("-")[0] + "-" + catch_all_id.split("-")[1] if "-" in catch_all_id else catch_all_id
+            )
 
             # Simpler: exact match for catch-all
             is_catch_all = agent_id == catch_all_id or agent_id.startswith(catch_all_id)
@@ -199,11 +201,13 @@ class PromptComposer:
                     note_id = meta.get("id", "?")
                     preview = body.split("\n\n")[0].strip() if body else "(empty)"
                     note_lines.append(f"**{note_id}** ({created}) [{tags_str}]\n{preview}")
-                yield "system_notes", (
-                    "# Open System Notes\n\n"
-                    "The following notes have been submitted through the dashboard "
-                    "and are awaiting attention:\n\n"
-                    + "\n\n".join(note_lines)
+                yield (
+                    "system_notes",
+                    (
+                        "# Open System Notes\n\n"
+                        "The following notes have been submitted through the dashboard "
+                        "and are awaiting attention:\n\n" + "\n\n".join(note_lines)
+                    ),
                 )
 
         # 10. Quality gates (builder agents only)

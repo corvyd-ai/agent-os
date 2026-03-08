@@ -43,7 +43,9 @@ class Config:
     """
 
     # Root of the agent-os filesystem
-    company_root: Path = field(default_factory=lambda: Path(os.environ.get("AGENT_OS_ROOT", os.environ.get("AIOS_COMPANY_ROOT", "."))))
+    company_root: Path = field(
+        default_factory=lambda: Path(os.environ.get("AGENT_OS_ROOT", os.environ.get("AIOS_COMPANY_ROOT", ".")))
+    )
 
     # Company name (used in generic templates)
     company_name: str = "My Company"

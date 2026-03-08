@@ -13,10 +13,18 @@ from agent_os.registry import AgentConfig
 def company_root(tmp_path):
     """Create a minimal company filesystem."""
     root = tmp_path / "company"
-    for d in ["agents/registry", "agents/state", "agents/tasks/queued",
-              "agents/messages/broadcast", "agents/messages/threads",
-              "agents/messages/feedback", "agents/logs",
-              "identity", "strategy/drives", "strategy/proposals/active"]:
+    for d in [
+        "agents/registry",
+        "agents/state",
+        "agents/tasks/queued",
+        "agents/messages/broadcast",
+        "agents/messages/threads",
+        "agents/messages/feedback",
+        "agents/logs",
+        "identity",
+        "strategy/drives",
+        "strategy/proposals/active",
+    ]:
         (root / d).mkdir(parents=True, exist_ok=True)
     (root / "identity" / "values.md").write_text("Be excellent.")
     (root / "strategy" / "drives.md").write_text("Ship products.")
@@ -81,6 +89,7 @@ class TestChainLoader:
 class TestFeedbackRouting:
     def _make_note(self, feedback_dir, note_id, tags=None, status="open"):
         import yaml
+
         meta = {"id": note_id, "status": status, "created": "2026-03-07"}
         if tags:
             meta["tags"] = tags
@@ -103,8 +112,12 @@ class TestFeedbackRouting:
         self._make_note(feedback_dir, "note-001", tags=["strategy"])
 
         steward = AgentConfig(
-            agent_id="agent-000-steward", name="Steward", role="Board Secretary / Human Interface",
-            model="claude-sonnet-4-6", allowed_tools=["Read"], registry_path=Path("/tmp/f.md"),
+            agent_id="agent-000-steward",
+            name="Steward",
+            role="Board Secretary / Human Interface",
+            model="claude-sonnet-4-6",
+            allowed_tools=["Read"],
+            registry_path=Path("/tmp/f.md"),
             system_body="I govern.",
         )
 
@@ -122,8 +135,12 @@ class TestFeedbackRouting:
         self._make_note(feedback_dir, "note-001", tags=["dashboard"])
 
         maker = AgentConfig(
-            agent_id="agent-001-maker", name="Maker", role="Software Engineer",
-            model="claude-sonnet-4-6", allowed_tools=["Read"], registry_path=Path("/tmp/f.md"),
+            agent_id="agent-001-maker",
+            name="Maker",
+            role="Software Engineer",
+            model="claude-sonnet-4-6",
+            allowed_tools=["Read"],
+            registry_path=Path("/tmp/f.md"),
             system_body="I make.",
         )
 
@@ -144,8 +161,12 @@ class TestFeedbackRouting:
         self._make_note(feedback_dir, "note-001", tags=["dashboard"])
 
         strategist = AgentConfig(
-            agent_id="agent-006-strategist", name="Strategist", role="PM / PMM",
-            model="claude-sonnet-4-6", allowed_tools=["Read"], registry_path=Path("/tmp/f.md"),
+            agent_id="agent-006-strategist",
+            name="Strategist",
+            role="PM / PMM",
+            model="claude-sonnet-4-6",
+            allowed_tools=["Read"],
+            registry_path=Path("/tmp/f.md"),
             system_body="I strategize.",
         )
 
