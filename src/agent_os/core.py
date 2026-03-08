@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -20,12 +20,14 @@ import yaml
 from .config import Config, get_config
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+def _now_iso(*, config: Config | None = None) -> str:
+    cfg = config or get_config()
+    return datetime.now(cfg.tz).isoformat()
 
 
-def _today() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%d")
+def _today(*, config: Config | None = None) -> str:
+    cfg = config or get_config()
+    return datetime.now(cfg.tz).strftime("%Y-%m-%d")
 
 
 def _parse_frontmatter(path: Path) -> tuple[dict, str]:
@@ -64,6 +66,7 @@ def next_id(prefix: str, directory: Path, *, config: Config | None = None) -> st
             cfg.tasks_done,
             cfg.tasks_failed,
             cfg.tasks_declined,
+            cfg.tasks_backlog,
         ]
     else:
         search_dirs = [directory]
@@ -197,7 +200,7 @@ def fail_task(
     meta, body = _parse_frontmatter(task_file)
     meta["status"] = "failed"
     meta["outcome"] = outcome
-    failure_text = f"\n\n## Failure\n\n**Date**: {_now_iso()}\n**Reason**: {reason}\n"
+    failure_text = f"\n\n## Failure\n\n**Date**: {_now_iso(config=cfg)}\n**Reason**: {reason}\n"
 
     if error_refs:
         diag_fields = ["error_class", "error_category", "retryable", "exit_code", "stderr"]
@@ -230,7 +233,7 @@ def decline_task(task_id: str, reason: str, *, config: Config | None = None) -> 
     task_path = matches[0]
     meta, body = _parse_frontmatter(task_path)
     meta["status"] = "declined"
-    body += f"\n\n## Declined\n\n**Date**: {_now_iso()}\n**Reason**: {reason}\n"
+    body += f"\n\n## Declined\n\n**Date**: {_now_iso(config=cfg)}\n**Reason**: {reason}\n"
     _write_frontmatter(task_path, meta, body)
     dest = cfg.tasks_declined / task_path.name
     cfg.tasks_declined.mkdir(parents=True, exist_ok=True)
@@ -307,7 +310,7 @@ def send_message(
 ) -> str:
     """Send a message: write to recipient's inbox and sender's outbox."""
     cfg = config or get_config()
-    date_prefix = datetime.now(UTC).strftime("msg-%Y-%m%d")
+    date_prefix = datetime.now(cfg.tz).strftime("msg-%Y-%m%d")
     inbox = cfg.messages_dir / to_agent / "inbox"
     msg_id = next_id(date_prefix, inbox, config=cfg)
 
@@ -315,7 +318,7 @@ def send_message(
         "id": msg_id,
         "from": from_agent,
         "to": to_agent,
-        "date": _now_iso(),
+        "date": _now_iso(config=cfg),
         "subject": subject,
         "urgency": urgency,
         "requires_response": requires_response,
@@ -371,10 +374,10 @@ def log_action(
     cfg = config or get_config()
     log_dir = cfg.logs_dir / agent_id
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{_today()}.jsonl"
+    log_file = log_dir / f"{_today(config=cfg)}.jsonl"
 
     entry = {
-        "timestamp": _now_iso(),
+        "timestamp": _now_iso(config=cfg),
         "agent": agent_id,
         "action": action,
         "detail": detail,
@@ -398,8 +401,8 @@ def append_journal(agent_id: str, entry: str, *, config: Config | None = None) -
     journal_file = cfg.logs_dir / agent_id / "journal.md"
     journal_file.parent.mkdir(parents=True, exist_ok=True)
 
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-    now = datetime.now(UTC).strftime("%H:%M UTC")
+    today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
+    now = datetime.now(cfg.tz).strftime("%H:%M %Z")
 
     header = f"\n## {today} {now}\n\n"
 
@@ -452,7 +455,7 @@ def check_cadence(agent_id: str, order_name: str, interval_hours: float, *, conf
 
     try:
         last_run = datetime.fromisoformat(cadence_file.read_text().strip())
-        elapsed_hours = (datetime.now(UTC) - last_run).total_seconds() / 3600
+        elapsed_hours = (datetime.now(cfg.tz) - last_run).total_seconds() / 3600
         tolerance_hours = 0.5  # 30 min buffer for execution time drift
         return elapsed_hours >= (interval_hours - tolerance_hours)
     except (ValueError, OSError):
@@ -464,7 +467,23 @@ def mark_cadence(agent_id: str, order_name: str, *, config: Config | None = None
     cfg = config or get_config()
     cadence_file = cfg.logs_dir / agent_id / f".cadence-{order_name}"
     cadence_file.parent.mkdir(parents=True, exist_ok=True)
-    cadence_file.write_text(datetime.now(UTC).isoformat())
+    cadence_file.write_text(datetime.now(cfg.tz).isoformat())
+
+
+def get_last_cadence(agent_id: str, order_name: str, *, config: Config | None = None) -> float:
+    """Get the timestamp (epoch seconds) of last cadence run.
+
+    Returns 0.0 if never run.
+    """
+    cfg = config or get_config()
+    cadence_file = cfg.logs_dir / agent_id / f".cadence-{order_name}"
+    if not cadence_file.exists():
+        return 0.0
+    try:
+        last_run = datetime.fromisoformat(cadence_file.read_text().strip())
+        return last_run.timestamp()
+    except (ValueError, OSError):
+        return 0.0
 
 
 # --- Cost tracking ---
@@ -483,10 +502,10 @@ def log_cost(
     """Log invocation cost to /company/finance/costs/."""
     cfg = config or get_config()
     cfg.costs_dir.mkdir(parents=True, exist_ok=True)
-    cost_file = cfg.costs_dir / f"{_today()}.jsonl"
+    cost_file = cfg.costs_dir / f"{_today(config=cfg)}.jsonl"
 
     entry = {
-        "timestamp": _now_iso(),
+        "timestamp": _now_iso(config=cfg),
         "agent": agent_id,
         "task": task_id,
         "cost_usd": cost_usd,
@@ -631,13 +650,13 @@ def post_broadcast(from_id: str, subject: str, body: str, *, config: Config | No
     """
     cfg = config or get_config()
     cfg.broadcast_dir.mkdir(parents=True, exist_ok=True)
-    date_prefix = datetime.now(UTC).strftime("broadcast-%Y-%m%d")
+    date_prefix = datetime.now(cfg.tz).strftime("broadcast-%Y-%m%d")
     msg_id = next_id(date_prefix, cfg.broadcast_dir, config=cfg)
 
     meta = {
         "id": msg_id,
         "from": from_id,
-        "date": _now_iso(),
+        "date": _now_iso(config=cfg),
         "subject": subject,
     }
 
@@ -707,6 +726,132 @@ def resolve_thread(thread_path: Path, *, config: Config | None = None) -> None:
     resolved_dir = thread_path.parent / "resolved"
     resolved_dir.mkdir(exist_ok=True)
     shutil.move(str(thread_path), str(resolved_dir / thread_path.name))
+
+
+# --- Feedback / system notes ---
+
+
+# --- Autonomy model ---
+
+
+def get_autonomy_level(agent_id: str, *, config: Config | None = None) -> str:
+    """Returns 'low', 'medium', or 'high' for the given agent."""
+    cfg = config or get_config()
+    return cfg.autonomy_agents.get(agent_id, cfg.autonomy_default)
+
+
+def create_task(
+    created_by: str,
+    title: str,
+    body: str,
+    assigned_to: str | None = None,
+    priority: str = "medium",
+    *,
+    config: Config | None = None,
+) -> tuple[str, str]:
+    """Create a task. Returns (task_id, destination).
+
+    low autonomy -> PermissionError
+    medium -> backlog/
+    high -> queued/
+    """
+    cfg = config or get_config()
+    level = get_autonomy_level(created_by, config=cfg)
+
+    if level == "low":
+        raise PermissionError(f"Agent {created_by} has 'low' autonomy and cannot create tasks")
+
+    date_prefix = datetime.now(cfg.tz).strftime("task-%Y-%m%d")
+
+    if level == "medium":
+        dest_dir = cfg.tasks_backlog
+        destination = "backlog"
+    else:  # high
+        dest_dir = cfg.tasks_queued
+        destination = "queued"
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    task_id = next_id(date_prefix, dest_dir, config=cfg)
+
+    meta = {
+        "id": task_id,
+        "title": title,
+        "created_by": created_by,
+        "assigned_to": assigned_to or "",
+        "priority": priority,
+        "status": destination,
+        "created_at": _now_iso(config=cfg),
+    }
+
+    _write_frontmatter(dest_dir / f"{task_id}.md", meta, body)
+
+    log_action(
+        created_by,
+        "task_created",
+        f"Created task {task_id} -> {destination}",
+        {"task_id": task_id, "destination": destination, "autonomy_level": level},
+        config=cfg,
+    )
+
+    return task_id, destination
+
+
+def promote_task(task_id: str, *, config: Config | None = None) -> Path | None:
+    """Move backlog/ -> queued/. Called by human via dashboard or CLI."""
+    cfg = config or get_config()
+    return _move_task(task_id, cfg.tasks_backlog, cfg.tasks_queued, "queued")
+
+
+def reject_task(task_id: str, reason: str, *, config: Config | None = None) -> Path | None:
+    """Move backlog/ -> declined/ with reason."""
+    cfg = config or get_config()
+    cfg.tasks_declined.mkdir(parents=True, exist_ok=True)
+    candidates = list(cfg.tasks_backlog.glob(f"{task_id}*"))
+    if not candidates:
+        return None
+    task_file = candidates[0]
+
+    meta, body = _parse_frontmatter(task_file)
+    meta["status"] = "declined"
+    body += f"\n\n## Rejected\n\n**Date**: {_now_iso(config=cfg)}\n**Reason**: {reason}\n"
+    _write_frontmatter(task_file, meta, body)
+
+    dest = cfg.tasks_declined / task_file.name
+    shutil.move(str(task_file), str(dest))
+
+    # Notify the creating agent
+    created_by = meta.get("created_by", "")
+    title = meta.get("title", task_id)
+    if created_by and created_by != "human":
+        send_message(
+            from_agent="human",
+            to_agent=created_by,
+            subject=f"Rejected from backlog: {title}",
+            body=(
+                f'Task **{task_id}** ("{title}") was rejected from the backlog.\n\n'
+                f"**Reason**: {reason}\n\n"
+                f"Consider an alternative approach or adjusting the scope."
+            ),
+            urgency="normal",
+            config=cfg,
+        )
+
+    return dest
+
+
+def list_backlog(*, config: Config | None = None) -> list[tuple[dict, str, Path]]:
+    """List all backlog items, sorted by priority."""
+    cfg = config or get_config()
+    if not cfg.tasks_backlog.exists():
+        return []
+
+    priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    results = []
+    for task_path in sorted(cfg.tasks_backlog.glob("*.md")):
+        meta, body = _parse_frontmatter(task_path)
+        results.append((meta, body, task_path))
+    results.sort(key=lambda x: priority_order.get(x[0].get("priority", "medium"), 2))
+    return results
 
 
 # --- Feedback / system notes ---

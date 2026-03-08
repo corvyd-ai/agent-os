@@ -32,6 +32,7 @@ INIT_DIRS = [
     "agents/tasks/in-review",
     "agents/tasks/done",
     "agents/tasks/failed",
+    "agents/tasks/backlog",
     "agents/messages/broadcast",
     "agents/messages/threads",
     "agents/logs",
@@ -123,6 +124,9 @@ Next steps:
   # Run your agent:
   export ANTHROPIC_API_KEY=your-key-here
   agent-os cycle agent-001-builder
+
+  # Set up automatic scheduling:
+  agent-os cron install
 """)
 
 
@@ -241,6 +245,227 @@ def cmd_dream(args):
     )
 
 
+# --- tick command ---
+
+
+def cmd_tick(args):
+    """Run the scheduler tick — dispatches any due work."""
+    _set_root(args)
+    from .scheduler import tick
+
+    result = asyncio.run(tick())
+    if result.dispatched:
+        print(f"[agent-os] Tick: dispatched {len(result.dispatched)} item(s)", flush=True)
+    elif result.skipped:
+        reasons = ", ".join(result.skipped)
+        print(f"[agent-os] Tick: skipped ({reasons})", flush=True)
+    else:
+        print("[agent-os] Tick: nothing due", flush=True)
+
+
+# --- schedule command ---
+
+
+def cmd_schedule(args):
+    """Show schedule status."""
+    _set_root(args)
+    from .scheduler import get_schedule_status
+
+    print(get_schedule_status())
+
+
+# --- budget command ---
+
+
+def cmd_budget(args):
+    """Show budget status with progress bars."""
+    _set_root(args)
+    from .budget import format_budget_report
+
+    print(format_budget_report())
+
+
+# --- backlog command ---
+
+
+def cmd_backlog(args):
+    """Manage the task backlog."""
+    _set_root(args)
+    from . import core as aios
+
+    action = getattr(args, "backlog_action", None)
+
+    if action == "promote":
+        result = aios.promote_task(args.task_id)
+        if result:
+            print(f"Promoted {args.task_id} to queued/ at {result}")
+        else:
+            print(f"Error: {args.task_id} not found in backlog/")
+            sys.exit(1)
+    elif action == "reject":
+        reason = args.reason or "No reason given"
+        result = aios.reject_task(args.task_id, reason)
+        if result:
+            print(f"Rejected {args.task_id} -> declined/ at {result}")
+        else:
+            print(f"Error: {args.task_id} not found in backlog/")
+            sys.exit(1)
+    else:
+        # List backlog
+        items = aios.list_backlog()
+        if not items:
+            print("Backlog is empty.")
+            return
+        print(f"Backlog: {len(items)} item(s)")
+        print("-" * 60)
+        for meta, _body, path in items:
+            task_id = meta.get("id", path.stem)
+            title = meta.get("title", "Untitled")
+            created_by = meta.get("created_by", "unknown")
+            priority = meta.get("priority", "medium")
+            print(f"  [{priority}] {task_id}: {title} (by {created_by})")
+
+
+# --- archive command ---
+
+
+def cmd_archive(args):
+    """Run archive maintenance."""
+    _set_root(args)
+    from .maintenance import run_archive
+
+    result = run_archive()
+    print(
+        f"Archived: {result.broadcasts_archived} broadcasts, {result.tasks_archived} tasks, {result.threads_archived} threads"
+    )
+    print(f"Total: {result.total_archived} items")
+
+
+# --- manifest command ---
+
+
+def cmd_manifest(args):
+    """Regenerate knowledge manifest."""
+    _set_root(args)
+    from .maintenance import run_manifest
+
+    path = run_manifest()
+    print(f"Manifest written to {path}")
+
+
+# --- watchdog command ---
+
+
+def cmd_watchdog(args):
+    """Check agent liveness."""
+    _set_root(args)
+    from .maintenance import run_watchdog
+
+    result = run_watchdog()
+    print(f"Checked: {result.agents_checked} agents")
+    print(f"Healthy: {result.agents_healthy} | Stale: {result.agents_stale}")
+    if result.alerts:
+        print("\nAlerts:")
+        for alert in result.alerts:
+            print(f"  ! {alert}")
+    else:
+        print("All agents healthy.")
+
+
+# --- cron command ---
+
+_CRON_MARKER = "# agent-os-tick"
+
+
+def _find_toml_path(args) -> Path:
+    """Resolve the absolute path to the agent-os.toml config file."""
+    config_path = getattr(args, "config", None)
+    if config_path:
+        return Path(config_path).resolve()
+
+    from .config import Config
+
+    root = getattr(args, "root", None)
+    toml_path = Config.discover_toml(Path(root).resolve() if root else None)
+    if toml_path:
+        return toml_path.resolve()
+
+    # Default: look in cwd
+    candidate = Path.cwd() / "agent-os.toml"
+    if candidate.is_file():
+        return candidate.resolve()
+    return candidate  # will be used in the cron line even if not found yet
+
+
+def _get_current_crontab() -> str:
+    """Read the current user crontab."""
+    import subprocess
+
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        return result.stdout if result.returncode == 0 else ""
+    except FileNotFoundError:
+        return ""
+
+
+def _set_crontab(content: str) -> bool:
+    """Write a new crontab. Returns True on success."""
+    import subprocess
+
+    result = subprocess.run(["crontab", "-"], input=content, capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def cmd_cron(args):
+    """Manage the agent-os cron entry."""
+    action = getattr(args, "cron_action", None)
+
+    if action == "install":
+        toml_path = _find_toml_path(args)
+        log_dir = toml_path.parent / "company" / "operations" / "logs"
+
+        cron_line = f"* * * * * agent-os tick --config {toml_path} >> {log_dir}/scheduler.log 2>&1 {_CRON_MARKER}"
+
+        current = _get_current_crontab()
+        if _CRON_MARKER in current:
+            print("agent-os tick is already installed in crontab.")
+            print("Run 'agent-os cron uninstall' first to replace it.")
+            return
+
+        new_crontab = current.rstrip("\n") + "\n" + cron_line + "\n"
+        if _set_crontab(new_crontab):
+            log_dir.mkdir(parents=True, exist_ok=True)
+            print("Installed agent-os tick in crontab:")
+            print(f"  {cron_line}")
+        else:
+            print("Error: failed to install crontab entry.", file=sys.stderr)
+            sys.exit(1)
+
+    elif action == "uninstall":
+        current = _get_current_crontab()
+        if _CRON_MARKER not in current:
+            print("No agent-os tick entry found in crontab.")
+            return
+
+        lines = [line for line in current.splitlines() if _CRON_MARKER not in line]
+        if _set_crontab("\n".join(lines) + "\n"):
+            print("Removed agent-os tick from crontab.")
+        else:
+            print("Error: failed to update crontab.", file=sys.stderr)
+            sys.exit(1)
+
+    else:
+        # status
+        current = _get_current_crontab()
+        if _CRON_MARKER in current:
+            for line in current.splitlines():
+                if _CRON_MARKER in line:
+                    print(f"Installed: {line.replace(_CRON_MARKER, '').strip()}")
+                    break
+        else:
+            print("Not installed. Run 'agent-os cron install' to set up.")
+
+
 # --- dashboard command ---
 
 
@@ -338,6 +563,62 @@ def main():
     p_dream.add_argument("agent", help="Agent ID")
     _add_common_args(p_dream)
     p_dream.set_defaults(func=cmd_dream)
+
+    # tick
+    p_tick = subparsers.add_parser("tick", help="Run scheduler tick (the one cron entry)")
+    _add_common_args(p_tick)
+    p_tick.set_defaults(func=cmd_tick)
+
+    # schedule
+    p_sched = subparsers.add_parser("schedule", help="Show schedule status")
+    _add_common_args(p_sched)
+    p_sched.set_defaults(func=cmd_schedule)
+
+    # budget
+    p_budget = subparsers.add_parser("budget", help="Show budget status")
+    _add_common_args(p_budget)
+    p_budget.set_defaults(func=cmd_budget)
+
+    # backlog
+    p_backlog = subparsers.add_parser("backlog", help="Manage task backlog")
+    _add_common_args(p_backlog)
+    backlog_sub = p_backlog.add_subparsers(dest="backlog_action")
+
+    p_bl_promote = backlog_sub.add_parser("promote", help="Promote backlog item to queued")
+    p_bl_promote.add_argument("task_id", help="Task ID to promote")
+
+    p_bl_reject = backlog_sub.add_parser("reject", help="Reject backlog item")
+    p_bl_reject.add_argument("task_id", help="Task ID to reject")
+    p_bl_reject.add_argument("--reason", default=None, help="Rejection reason")
+
+    p_backlog.set_defaults(func=cmd_backlog)
+
+    # archive
+    p_archive = subparsers.add_parser("archive", help="Run archive maintenance")
+    _add_common_args(p_archive)
+    p_archive.set_defaults(func=cmd_archive)
+
+    # manifest
+    p_manifest = subparsers.add_parser("manifest", help="Regenerate knowledge manifest")
+    _add_common_args(p_manifest)
+    p_manifest.set_defaults(func=cmd_manifest)
+
+    # watchdog
+    p_watchdog = subparsers.add_parser("watchdog", help="Check agent liveness")
+    _add_common_args(p_watchdog)
+    p_watchdog.set_defaults(func=cmd_watchdog)
+
+    # cron
+    p_cron = subparsers.add_parser("cron", help="Manage the agent-os cron entry")
+    p_cron.add_argument("--root", default=None, help="Company root directory")
+    p_cron.add_argument("--config", default=None, help="Path to agent-os.toml config file")
+    cron_sub = p_cron.add_subparsers(dest="cron_action")
+    p_cron_install = cron_sub.add_parser("install", help="Install agent-os tick in crontab")
+    p_cron_install.add_argument("--config", default=None, help="Path to agent-os.toml config file")
+    p_cron_install.add_argument("--root", default=None, help="Company root directory")
+    cron_sub.add_parser("uninstall", help="Remove agent-os tick from crontab")
+    cron_sub.add_parser("status", help="Check if agent-os tick is installed")
+    p_cron.set_defaults(func=cmd_cron)
 
     # dashboard
     p_dash = subparsers.add_parser("dashboard", help="Launch the dashboard")

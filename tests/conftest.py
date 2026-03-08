@@ -36,6 +36,7 @@ _CONFIG_PATH_NAMES = [
     "VALUES_FILE",
     "BROADCAST_DIR",
     "THREADS_DIR",
+    "TASKS_BACKLOG",
 ]
 
 
@@ -62,6 +63,7 @@ def _build_dir_tree(root: Path) -> dict[str, Path]:
         "VALUES_FILE": root / "identity" / "values.md",
         "BROADCAST_DIR": root / "agents" / "messages" / "broadcast",
         "THREADS_DIR": root / "agents" / "messages" / "threads",
+        "TASKS_BACKLOG": root / "agents" / "tasks" / "backlog",
     }
 
     for name, p in paths.items():

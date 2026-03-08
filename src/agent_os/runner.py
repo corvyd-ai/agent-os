@@ -18,7 +18,7 @@ import random
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -52,6 +52,7 @@ except ImportError:
     CLIJSONDecodeError = _Unavailable
 
 from . import core as aios  # aliased as aios for minimal internal churn
+from .budget import check_agent_budget, check_budget
 from .composer import PromptComposer
 from .config import Config, get_config
 from .errors import ClaudeErrorClassifier
@@ -64,8 +65,9 @@ _error_classifier = ClaudeErrorClassifier()
 
 
 def _now_iso() -> str:
-    """Current UTC time in ISO format."""
-    return datetime.now(UTC).isoformat()
+    """Current time in configured timezone, ISO format."""
+    cfg = get_config()
+    return datetime.now(cfg.tz).isoformat()
 
 
 def _classify_idle_cycle(agent_id: str, *, config: Config | None = None) -> str:
@@ -388,6 +390,48 @@ async def _run_query(
     raise RuntimeError(f"SDK error during {label} (after {max_retries} retries): {detail}") from last_exc
 
 
+# --- Budget gate ---
+
+
+def _check_budget_gate(agent_id: str, mode: str, *, config: Config | None = None) -> bool:
+    """Check aggregate budget and per-agent cap. Returns True if OK to proceed."""
+    cfg = config or get_config()
+
+    budget = check_budget(config=cfg)
+    if budget.circuit_breaker_tripped:
+        print(
+            f"[agent-os] BUDGET: ${budget.daily_spent:.2f} of ${budget.daily_cap:.2f} daily spent. "
+            f"Skipping {mode} for {agent_id}.",
+            flush=True,
+        )
+        aios.log_action(
+            agent_id,
+            "budget_blocked",
+            f"Circuit breaker tripped — skipping {mode}",
+            {"daily_spent": budget.daily_spent, "daily_cap": budget.daily_cap},
+            config=cfg,
+        )
+        return False
+
+    within, agent_spent = check_agent_budget(agent_id, config=cfg)
+    if not within:
+        cap = cfg.agent_daily_caps.get(agent_id, 0)
+        print(
+            f"[agent-os] BUDGET: {agent_id} at ${agent_spent:.2f} of ${cap:.2f} agent cap. Skipping {mode}.",
+            flush=True,
+        )
+        aios.log_action(
+            agent_id,
+            "agent_budget_blocked",
+            f"Agent daily cap reached — skipping {mode}",
+            {"agent_spent": agent_spent, "agent_cap": cap},
+            config=cfg,
+        )
+        return False
+
+    return True
+
+
 # --- Invocation modes ---
 
 
@@ -401,6 +445,10 @@ async def run_agent(
 ) -> None:
     """Run an agent on a specific task."""
     cfg = config or get_config()
+
+    if not _check_budget_gate(agent_id, "task", config=cfg):
+        return
+
     composer = PromptComposer(config=cfg)
 
     agent_config = load_agent(agent_id, config=cfg)
@@ -559,10 +607,28 @@ async def run_drive_consultation(
 ) -> None:
     """Consult drives — agents think about what the company needs."""
     cfg = config or get_config()
+
+    if not _check_budget_gate(agent_id, "drive_consultation", config=cfg):
+        return
+
     composer = PromptComposer(config=cfg)
 
     agent_config = load_agent(agent_id, config=cfg)
     agent_key = agent_config.agent_id
+
+    # Idle-exit gate: skip if nothing has changed since last consultation
+    proposals = aios.list_active_proposals(config=cfg)
+    drives_mtime = cfg.drives_file.stat().st_mtime if cfg.drives_file.exists() else 0
+    last_consultation = aios.get_last_cadence(agent_key, "drive-consultation", config=cfg)
+    if not proposals and drives_mtime < last_consultation:
+        aios.log_action(
+            agent_key,
+            "drive_consultation_idle",
+            "No proposals or drive changes since last consultation",
+            config=cfg,
+        )
+        print(f"[agent-os] {agent_key}: drive consultation idle (no changes), skipping ($0)", flush=True)
+        return
 
     expected_at = _now_iso()  # Drive consultations run on cron schedule; expected = now
     print(f"[agent-os] {agent_key}: running drive consultation...", flush=True)
@@ -651,6 +717,10 @@ async def run_dream_cycle(
 ) -> None:
     """Nightly dream cycle — agents reorganize their memory state."""
     cfg = config or get_config()
+
+    if not _check_budget_gate(agent_id, "dream_cycle", config=cfg):
+        return
+
     composer = PromptComposer(config=cfg)
 
     agent_config = load_agent(agent_id, config=cfg)
@@ -1019,6 +1089,10 @@ async def run_cycle(
 ) -> None:
     """One-shot cycle for cron: check tasks, triage messages, respond to threads."""
     cfg = config or get_config()
+
+    if not _check_budget_gate(agent_id, "cycle", config=cfg):
+        return
+
     agent_config = load_agent(agent_id, config=cfg)
 
     next_task = aios._find_next_task(agent_config.agent_id, config=cfg)
@@ -1056,6 +1130,10 @@ async def run_standing_orders(
     When due, loads the prompt from the standing order file and invokes Claude.
     """
     cfg = config or get_config()
+
+    if not _check_budget_gate(agent_id, "standing_orders", config=cfg):
+        return
+
     composer = PromptComposer(config=cfg)
 
     agent_config = load_agent(agent_id, config=cfg)

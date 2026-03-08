@@ -28,6 +28,7 @@ AIOS_TOOL_NAMES = [
     "mcp__aios__send_message",
     "mcp__aios__post_broadcast",
     "mcp__aios__log_action",
+    "mcp__aios__create_task",
 ]
 
 
@@ -158,6 +159,39 @@ def create_aios_tools_server(agent_id: str, *, config: Config | None = None):
         )
         return _text_response(f"Logged: [{action}] {detail}")
 
+    @tool(
+        name="create_task",
+        description=(
+            "Create a task for any agent. Where the task goes (backlog or queued) "
+            "depends on your autonomy level. At 'low' autonomy, this will fail. "
+            "At 'medium', the task goes to backlog/ for human approval. "
+            "At 'high', the task goes directly to queued/."
+        ),
+        input_schema={
+            "title": str,
+            "body": str,
+            "assigned_to": str,
+            "priority": str,
+        },
+    )
+    async def create_task_tool(args):
+        title = args["title"]
+        body = args["body"]
+        assigned_to = args.get("assigned_to", "")
+        priority = args.get("priority", "medium")
+        try:
+            task_id, destination = aios.create_task(
+                created_by=agent_id,
+                title=title,
+                body=body,
+                assigned_to=assigned_to or None,
+                priority=priority,
+                config=cfg,
+            )
+            return _text_response(f"Task {task_id} created in {destination}/ — {title}")
+        except PermissionError as e:
+            return _text_response(str(e), is_error=True)
+
     return create_sdk_mcp_server(
         name="aios",
         version="1.0.0",
@@ -168,5 +202,6 @@ def create_aios_tools_server(agent_id: str, *, config: Config | None = None):
             send_message_tool,
             post_broadcast_tool,
             log_action_tool,
+            create_task_tool,
         ],
     )

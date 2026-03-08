@@ -16,4 +16,10 @@ from .core import (  # noqa: F401 — re-export private names used by tests/inte
     _parse_frontmatter,
     _today,
     _write_frontmatter,
+    create_task,
+    get_autonomy_level,
+    get_last_cadence,
+    list_backlog,
+    promote_task,
+    reject_task,
 )

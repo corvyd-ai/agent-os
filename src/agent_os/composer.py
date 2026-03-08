@@ -15,7 +15,7 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -87,7 +87,7 @@ class PromptComposer:
         11. Task context (if present)
         """
         cfg = self.config
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
 
         # 1. Preamble
         yield (

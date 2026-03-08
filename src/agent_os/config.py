@@ -32,6 +32,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -50,10 +51,18 @@ class Config:
     # Company name (used in generic templates)
     company_name: str = "My Company"
 
+    # Timezone for all scheduling, logging, and day boundaries (IANA name)
+    timezone: str = "UTC"
+
     def __post_init__(self):
         # Coerce company_root to Path if a string was passed
         if isinstance(self.company_root, str):
             object.__setattr__(self, "company_root", Path(self.company_root))
+
+    @property
+    def tz(self) -> ZoneInfo:
+        """Return the configured timezone as a ZoneInfo object."""
+        return ZoneInfo(self.timezone)
 
     # Model defaults
     default_model: str = "claude-opus-4-6"
@@ -73,7 +82,41 @@ class Config:
     # Directory for company-specific template overrides (searched before package defaults)
     prompts_override_dir: Path | None = None
 
-    # --- Budget & turn limits ---
+    # --- Aggregate budget caps (circuit breaker) ---
+    daily_budget_cap_usd: float = 100.00
+    weekly_budget_cap_usd: float = 500.00
+    monthly_budget_cap_usd: float = 2000.00
+    agent_daily_caps: dict[str, float] = field(default_factory=dict)
+
+    # --- Autonomy model ---
+    autonomy_default: str = "medium"
+    autonomy_agents: dict[str, str] = field(default_factory=dict)
+
+    # --- Schedule config ---
+    schedule_enabled: bool = True
+    schedule_operating_hours: str = ""  # e.g. "07:00-23:00" in configured timezone, empty = 24/7
+    schedule_cycles_enabled: bool = True
+    schedule_cycles_interval_minutes: int = 15
+    schedule_cycles_agents: list[str] = field(default_factory=lambda: ["all"])
+    schedule_standing_orders_enabled: bool = True
+    schedule_standing_orders_interval_minutes: int = 60
+    schedule_drives_enabled: bool = True
+    schedule_drives_weekday_times: list[str] = field(default_factory=lambda: ["17:00"])
+    schedule_drives_weekend_times: list[str] = field(default_factory=lambda: ["13:00"])
+    schedule_dreams_enabled: bool = True
+    schedule_dreams_time: str = "02:00"
+    schedule_dreams_stagger_minutes: int = 10
+    # Maintenance sub-schedules
+    schedule_archive_enabled: bool = True
+    schedule_archive_time: str = "03:00"
+    schedule_manifest_enabled: bool = True
+    schedule_manifest_interval_minutes: int = 120
+    schedule_watchdog_enabled: bool = True
+    schedule_watchdog_interval_minutes: int = 15
+    schedule_watchdog_alert_threshold_minutes: int = 45
+    schedule_watchdog_alert_hook: str = ""
+
+    # --- Budget & turn limits (per-invocation) ---
 
     # Standard task invocation
     max_budget_per_invocation_usd: float = 5.00
@@ -129,6 +172,8 @@ class Config:
         company = data.get("company", {})
         if "name" in company:
             kwargs["company_name"] = company["name"]
+        if "timezone" in company:
+            kwargs["timezone"] = company["timezone"]
         if "root" in company:
             root = Path(company["root"])
             kwargs["company_root"] = root if root.is_absolute() else toml_dir / root
@@ -140,7 +185,7 @@ class Config:
         if "builder_roles" in runtime:
             kwargs["builder_roles"] = frozenset(runtime["builder_roles"])
 
-        # [budget]
+        # [budget] — per-invocation limits
         budget = data.get("budget", {})
         budget_map = {
             "task": "max_budget_per_invocation_usd",
@@ -154,6 +199,88 @@ class Config:
         for toml_key, field_name in budget_map.items():
             if toml_key in budget:
                 kwargs[field_name] = float(budget[toml_key])
+
+        # [budget] — aggregate caps (circuit breaker)
+        if "daily_cap" in budget:
+            kwargs["daily_budget_cap_usd"] = float(budget["daily_cap"])
+        if "weekly_cap" in budget:
+            kwargs["weekly_budget_cap_usd"] = float(budget["weekly_cap"])
+        if "monthly_cap" in budget:
+            kwargs["monthly_budget_cap_usd"] = float(budget["monthly_cap"])
+        agent_caps = budget.get("agent_daily_caps", {})
+        if agent_caps:
+            kwargs["agent_daily_caps"] = {k: float(v) for k, v in agent_caps.items()}
+
+        # [autonomy]
+        autonomy = data.get("autonomy", {})
+        if "default_level" in autonomy:
+            kwargs["autonomy_default"] = autonomy["default_level"]
+        agent_autonomy = autonomy.get("agents", {})
+        if agent_autonomy:
+            kwargs["autonomy_agents"] = dict(agent_autonomy)
+
+        # [schedule]
+        schedule = data.get("schedule", {})
+        if "enabled" in schedule:
+            kwargs["schedule_enabled"] = bool(schedule["enabled"])
+        if "operating_hours" in schedule:
+            kwargs["schedule_operating_hours"] = schedule["operating_hours"]
+
+        # [schedule.cycles]
+        cycles = schedule.get("cycles", {})
+        if "enabled" in cycles:
+            kwargs["schedule_cycles_enabled"] = bool(cycles["enabled"])
+        if "interval_minutes" in cycles:
+            kwargs["schedule_cycles_interval_minutes"] = int(cycles["interval_minutes"])
+        if "agents" in cycles:
+            kwargs["schedule_cycles_agents"] = list(cycles["agents"])
+
+        # [schedule.standing_orders]
+        so = schedule.get("standing_orders", {})
+        if "enabled" in so:
+            kwargs["schedule_standing_orders_enabled"] = bool(so["enabled"])
+        if "interval_minutes" in so:
+            kwargs["schedule_standing_orders_interval_minutes"] = int(so["interval_minutes"])
+
+        # [schedule.drives]
+        drives = schedule.get("drives", {})
+        if "enabled" in drives:
+            kwargs["schedule_drives_enabled"] = bool(drives["enabled"])
+        if "weekday_times" in drives:
+            kwargs["schedule_drives_weekday_times"] = list(drives["weekday_times"])
+        if "weekend_times" in drives:
+            kwargs["schedule_drives_weekend_times"] = list(drives["weekend_times"])
+
+        # [schedule.dreams]
+        dreams = schedule.get("dreams", {})
+        if "enabled" in dreams:
+            kwargs["schedule_dreams_enabled"] = bool(dreams["enabled"])
+        if "time" in dreams:
+            kwargs["schedule_dreams_time"] = dreams["time"]
+        if "stagger_minutes" in dreams:
+            kwargs["schedule_dreams_stagger_minutes"] = int(dreams["stagger_minutes"])
+
+        # [schedule.maintenance]
+        maint = schedule.get("maintenance", {})
+        archive = maint.get("archive", {})
+        if "enabled" in archive:
+            kwargs["schedule_archive_enabled"] = bool(archive["enabled"])
+        if "time" in archive:
+            kwargs["schedule_archive_time"] = archive["time"]
+        manifest = maint.get("manifest", {})
+        if "enabled" in manifest:
+            kwargs["schedule_manifest_enabled"] = bool(manifest["enabled"])
+        if "interval_minutes" in manifest:
+            kwargs["schedule_manifest_interval_minutes"] = int(manifest["interval_minutes"])
+        watchdog = maint.get("watchdog", {})
+        if "enabled" in watchdog:
+            kwargs["schedule_watchdog_enabled"] = bool(watchdog["enabled"])
+        if "interval_minutes" in watchdog:
+            kwargs["schedule_watchdog_interval_minutes"] = int(watchdog["interval_minutes"])
+        if "alert_threshold_minutes" in watchdog:
+            kwargs["schedule_watchdog_alert_threshold_minutes"] = int(watchdog["alert_threshold_minutes"])
+        if "alert_hook" in watchdog:
+            kwargs["schedule_watchdog_alert_hook"] = watchdog["alert_hook"]
 
         # [roles]
         roles = data.get("roles", {})
@@ -248,6 +375,10 @@ class Config:
     def tasks_declined(self) -> Path:
         return self.tasks_dir / "declined"
 
+    @property
+    def tasks_backlog(self) -> Path:
+        return self.tasks_dir / "backlog"
+
     # Agent state
     @property
     def agents_state_dir(self) -> Path:
@@ -287,10 +418,19 @@ class Config:
     def feedback_dir(self) -> Path:
         return self.messages_dir / "feedback"
 
+    # Operations
+    @property
+    def operations_dir(self) -> Path:
+        return self.company_root / "operations"
+
+    @property
+    def scheduler_state_file(self) -> Path:
+        return self.operations_dir / "scheduler-state.json"
+
     # Quality gate script
     @property
     def pre_done_checks_script(self) -> Path:
-        return self.company_root / "operations" / "scripts" / "pre-done-checks.sh"
+        return self.operations_dir / "scripts" / "pre-done-checks.sh"
 
 
 # --- Singleton ---
@@ -333,6 +473,7 @@ _COMPAT_MAP: dict[str, str] = {
     "TASKS_DONE": "tasks_done",
     "TASKS_FAILED": "tasks_failed",
     "TASKS_DECLINED": "tasks_declined",
+    "TASKS_BACKLOG": "tasks_backlog",
     "AGENTS_STATE_DIR": "agents_state_dir",
     "PROPOSALS_ACTIVE": "proposals_active",
     "PROPOSALS_DECIDED": "proposals_decided",
