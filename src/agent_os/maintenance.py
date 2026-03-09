@@ -100,6 +100,62 @@ def run_archive(
     return result
 
 
+@dataclass
+class LogArchiveResult:
+    """Result of a log archival run."""
+
+    files_archived: int = 0
+    files_deleted: int = 0
+    bytes_freed: int = 0
+
+
+def run_log_archive(*, config: Config | None = None) -> LogArchiveResult:
+    """Archive old JSONL log files beyond the retention period.
+
+    Files older than ``log_retention_days`` are compressed with gzip and
+    moved to a ``_archive/`` subdirectory. Files in ``_archive/`` older
+    than 2x retention are deleted.
+    """
+    import gzip
+
+    cfg = config or get_config()
+    result = LogArchiveResult()
+    retention_days = cfg.log_retention_days
+    now = time.time()
+    archive_cutoff = now - (retention_days * 86400)
+    delete_cutoff = now - (retention_days * 2 * 86400)
+
+    if not cfg.logs_dir.exists():
+        return result
+
+    for agent_dir in cfg.logs_dir.iterdir():
+        if not agent_dir.is_dir():
+            continue
+
+        # Archive old JSONL files
+        for log_file in agent_dir.glob("*.jsonl"):
+            if log_file.stat().st_mtime < archive_cutoff:
+                archive_dir = agent_dir / "_archive"
+                archive_dir.mkdir(exist_ok=True)
+                gz_path = archive_dir / f"{log_file.name}.gz"
+                with open(log_file, "rb") as f_in, gzip.open(gz_path, "wb") as f_out:
+                    f_out.writelines(f_in)
+                result.bytes_freed += log_file.stat().st_size
+                log_file.unlink()
+                result.files_archived += 1
+
+        # Delete very old archives
+        archive_dir = agent_dir / "_archive"
+        if archive_dir.exists():
+            for gz_file in archive_dir.glob("*.jsonl.gz"):
+                if gz_file.stat().st_mtime < delete_cutoff:
+                    result.bytes_freed += gz_file.stat().st_size
+                    gz_file.unlink()
+                    result.files_deleted += 1
+
+    return result
+
+
 def run_manifest(*, config: Config | None = None) -> Path:
     """Regenerate knowledge manifest (table of contents for company/knowledge/).
 

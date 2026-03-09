@@ -5,7 +5,7 @@ import time
 from datetime import UTC, datetime
 
 from agent_os.config import Config
-from agent_os.maintenance import run_archive, run_manifest, run_watchdog
+from agent_os.maintenance import run_archive, run_log_archive, run_manifest, run_watchdog
 
 
 class TestRunArchive:
@@ -137,3 +137,75 @@ class TestRunWatchdog:
 
         result = run_watchdog(config=aios_config)
         assert result.agents_checked == 0
+
+
+class TestLogArchive:
+    def test_archives_old_logs(self, aios_config):
+        import os
+
+        cfg = Config(company_root=aios_config.company_root, log_retention_days=7)
+        agent_dir = cfg.logs_dir / "agent-001"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        # Old log file (10 days ago)
+        old_file = agent_dir / "2026-02-20.jsonl"
+        old_file.write_text('{"action": "old"}\n')
+        old_time = time.time() - (10 * 86400)
+        os.utime(old_file, (old_time, old_time))
+
+        # Recent log file
+        new_file = agent_dir / "2026-03-08.jsonl"
+        new_file.write_text('{"action": "new"}\n')
+
+        result = run_log_archive(config=cfg)
+        assert result.files_archived == 1
+        assert not old_file.exists()
+        assert new_file.exists()
+        assert (agent_dir / "_archive" / "2026-02-20.jsonl.gz").exists()
+
+    def test_deletes_very_old_archives(self, aios_config):
+        import os
+
+        cfg = Config(company_root=aios_config.company_root, log_retention_days=7)
+        agent_dir = cfg.logs_dir / "agent-001"
+        archive_dir = agent_dir / "_archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        # Very old archive (3 months ago — well beyond 2x retention)
+        old_gz = archive_dir / "2025-12-01.jsonl.gz"
+        old_gz.write_bytes(b"fake gz data")
+        old_time = time.time() - (90 * 86400)
+        os.utime(old_gz, (old_time, old_time))
+
+        result = run_log_archive(config=cfg)
+        assert result.files_deleted == 1
+        assert not old_gz.exists()
+
+    def test_nothing_to_archive(self, aios_config):
+        cfg = Config(company_root=aios_config.company_root, log_retention_days=30)
+        # No logs dir at all
+        result = run_log_archive(config=cfg)
+        assert result.files_archived == 0
+        assert result.files_deleted == 0
+
+    def test_archives_compressed_correctly(self, aios_config):
+        import gzip
+        import os
+
+        cfg = Config(company_root=aios_config.company_root, log_retention_days=7)
+        agent_dir = cfg.logs_dir / "agent-001"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        content = '{"action": "test", "level": "info"}\n' * 10
+        old_file = agent_dir / "2026-01-15.jsonl"
+        old_file.write_text(content)
+        old_time = time.time() - (60 * 86400)
+        os.utime(old_file, (old_time, old_time))
+
+        run_log_archive(config=cfg)
+
+        gz_path = agent_dir / "_archive" / "2026-01-15.jsonl.gz"
+        assert gz_path.exists()
+        with gzip.open(gz_path, "rt") as f:
+            decompressed = f.read()
+        assert decompressed == content

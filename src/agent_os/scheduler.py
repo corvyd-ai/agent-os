@@ -22,6 +22,7 @@ from datetime import datetime
 
 from .budget import check_budget
 from .config import Config, get_config
+from .logger import get_logger
 from .registry import list_agents
 
 
@@ -246,13 +247,13 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
                 record = DispatchRecord(type="cycle", agent=agent_id, at=now_iso)
                 try:
-                    print(f"[agent-os][tick] Dispatching cycle for {agent_id}", flush=True)
+                    get_logger("system").info("tick_dispatch", f"Dispatching cycle for {agent_id}", {"type": "cycle", "agent": agent_id})
                     await runner.run_cycle(agent_id, config=cfg)
                     record.result = "done"
                     _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
                 except Exception as e:
                     record.result = f"error: {e}"
-                    print(f"[agent-os][tick] Error in cycle for {agent_id}: {e}", flush=True)
+                    get_logger("system").error("tick_error", f"Error in cycle for {agent_id}: {e}", {"type": "cycle", "agent": agent_id})
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -269,13 +270,13 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
                 record = DispatchRecord(type="standing_orders", agent=agent_id, at=now_iso)
                 try:
-                    print(f"[agent-os][tick] Dispatching standing orders for {agent_id}", flush=True)
+                    get_logger("system").info("tick_dispatch", f"Dispatching standing orders for {agent_id}", {"type": "standing_orders", "agent": agent_id})
                     await runner.run_standing_orders(agent_id, config=cfg)
                     record.result = "done"
                     _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
                 except Exception as e:
                     record.result = f"error: {e}"
-                    print(f"[agent-os][tick] Error in standing orders for {agent_id}: {e}", flush=True)
+                    get_logger("system").error("tick_error", f"Error in standing orders for {agent_id}: {e}", {"type": "standing_orders", "agent": agent_id})
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -292,12 +293,12 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
                 record = DispatchRecord(type="drives", agent=agent_id, at=now_iso)
                 try:
-                    print(f"[agent-os][tick] Dispatching drive consultation for {agent_id}", flush=True)
+                    get_logger("system").info("tick_dispatch", f"Dispatching drive consultation for {agent_id}", {"type": "drives", "agent": agent_id})
                     await runner.run_drive_consultation(agent_id, config=cfg)
                     record.result = "done"
                 except Exception as e:
                     record.result = f"error: {e}"
-                    print(f"[agent-os][tick] Error in drives for {agent_id}: {e}", flush=True)
+                    get_logger("system").error("tick_error", f"Error in drives for {agent_id}: {e}", {"type": "drives", "agent": agent_id})
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -318,12 +319,12 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
             record = DispatchRecord(type="dreams", agent=agent_id, at=now_iso)
             try:
-                print(f"[agent-os][tick] Dispatching dream cycle for {agent_id}", flush=True)
+                get_logger("system").info("tick_dispatch", f"Dispatching dream cycle for {agent_id}", {"type": "dreams", "agent": agent_id})
                 await runner.run_dream_cycle(agent_id, config=cfg)
                 record.result = "done"
             except Exception as e:
                 record.result = f"error: {e}"
-                print(f"[agent-os][tick] Error in dream for {agent_id}: {e}", flush=True)
+                get_logger("system").error("tick_error", f"Error in dream for {agent_id}: {e}", {"type": "dreams", "agent": agent_id})
             finally:
                 lock.close()
             result.dispatched.append(record)
@@ -335,12 +336,24 @@ async def tick(*, config: Config | None = None) -> TickResult:
     if cfg.schedule_archive_enabled and _is_time_match(cfg.schedule_archive_time, config=cfg):
         record = DispatchRecord(type="archive", agent="system", at=now_iso)
         try:
-            print("[agent-os][tick] Running archive maintenance", flush=True)
+            get_logger("system").info("tick_dispatch", "Running archive maintenance", {"type": "archive"})
             archive_result = maintenance.run_archive(config=cfg)
             record.result = f"done: {archive_result.total_archived} items archived"
         except Exception as e:
             record.result = f"error: {e}"
         result.dispatched.append(record)
+
+        # Also archive old log files
+        log_record = DispatchRecord(type="log_archive", agent="system", at=now_iso)
+        try:
+            log_result = maintenance.run_log_archive(config=cfg)
+            if log_result.files_archived or log_result.files_deleted:
+                log_record.result = f"done: {log_result.files_archived} archived, {log_result.files_deleted} deleted"
+            else:
+                log_record.result = "done: nothing to archive"
+        except Exception as e:
+            log_record.result = f"error: {e}"
+        result.dispatched.append(log_record)
 
     # Manifest
     if cfg.schedule_manifest_enabled and _is_cadence_due(
@@ -348,7 +361,7 @@ async def tick(*, config: Config | None = None) -> TickResult:
     ):
         record = DispatchRecord(type="manifest", agent="system", at=now_iso)
         try:
-            print("[agent-os][tick] Regenerating manifest", flush=True)
+            get_logger("system").info("tick_dispatch", "Regenerating manifest", {"type": "manifest"})
             maintenance.run_manifest(config=cfg)
             record.result = "done"
             _mark_scheduler_cadence("system", "scheduler-manifest", config=cfg)

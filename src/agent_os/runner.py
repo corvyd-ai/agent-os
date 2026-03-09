@@ -56,6 +56,7 @@ from .budget import check_agent_budget, check_budget
 from .composer import PromptComposer
 from .config import Config, get_config
 from .errors import ClaudeErrorClassifier
+from .logger import get_logger
 from .registry import load_agent
 from .tools import AIOS_TOOL_NAMES, create_aios_tools_server
 
@@ -127,12 +128,13 @@ def _compute_expected_at(agent_id: str, order_name: str, cadence_hours: float, *
 class StderrCapture:
     """Collects stderr lines from the SDK via the stderr callback."""
 
-    def __init__(self):
+    def __init__(self, agent_id: str = "system"):
         self.lines: list[str] = []
+        self._agent_id = agent_id
 
     def callback(self, line: str) -> None:
         self.lines.append(line)
-        print(f"[agent-os][stderr] {line}", flush=True)
+        get_logger(self._agent_id).debug("sdk_stderr", line)
 
     @property
     def text(self) -> str:
@@ -199,17 +201,11 @@ def _make_options(
 
     prompt_bytes = len(system_prompt.encode("utf-8"))
     if prompt_bytes > 120_000:
-        print(
-            f"[agent-os] WARNING: system prompt is {prompt_bytes:,} bytes "
-            f"(agent {agent_config.agent_id}). Linux MAX_ARG_STRLEN is 131072. "
-            f"Risk of 'Argument list too long' failure.",
-            flush=True,
-        )
-        aios.log_action(
-            agent_config.agent_id,
+        log = get_logger(agent_config.agent_id)
+        log.warn(
             "prompt_size_warning",
             f"System prompt {prompt_bytes:,} bytes — approaching 128KB CLI limit",
-            config=cfg,
+            {"bytes": prompt_bytes, "agent": agent_config.agent_id},
         )
 
     aios_server = create_aios_tools_server(agent_id=agent_config.agent_id, config=cfg)
@@ -266,25 +262,20 @@ def _run_quality_gates(code_dir: Path, *, config: Config | None = None) -> tuple
 def _ensure_api_key() -> None:
     """Ensure ANTHROPIC_API_KEY is set.
 
-    Checks the environment variable and common secret file locations.
+    By the time this is called, load_dotenv() has already loaded .env from
+    the project root. This function checks the result and provides a clear
+    error if the key is still missing.
     """
     if os.environ.get("ANTHROPIC_API_KEY"):
         return
 
-    # Check common locations for a key file
-    candidates = [
-        Path("secrets/anthropic_api_key.txt"),
-        Path.home() / ".anthropic" / "api_key.txt",
-    ]
-    for key_file in candidates:
-        if key_file.exists():
-            os.environ["ANTHROPIC_API_KEY"] = key_file.read_text().strip()
-            return
-
-    print("[agent-os] ERROR: No ANTHROPIC_API_KEY set.")
-    print("  Set the environment variable: export ANTHROPIC_API_KEY=your-key-here")
-    print("  Or place your key in: secrets/anthropic_api_key.txt")
-    sys.exit(1)
+    msg = (
+        "No ANTHROPIC_API_KEY set. "
+        "Add it to your .env file (ANTHROPIC_API_KEY=sk-ant-...) "
+        "or set the environment variable."
+    )
+    get_logger("system").error("api_key_missing", msg)
+    raise RuntimeError(msg)
 
 
 async def _run_query(
@@ -300,12 +291,13 @@ async def _run_query(
     Handles streaming output, error detection, retry for transient errors,
     and benign transport cleanup detection.
     """
+    log = get_logger("system")
     last_exc = None
 
     for attempt in range(max_retries + 1):
         if attempt > 0:
             backoff = (2**attempt) + random.uniform(0, 1)
-            print(f"[agent-os] Retry {attempt}/{max_retries} after {backoff:.1f}s...", flush=True)
+            log.info("sdk_retry", f"Retry {attempt}/{max_retries} after {backoff:.1f}s for {label}")
             await asyncio.sleep(backoff)
             if stderr_capture:
                 stderr_capture.clear()
@@ -319,7 +311,7 @@ async def _run_query(
                 if isinstance(message, AssistantMessage):
                     if hasattr(message, "error") and message.error:
                         api_errors.append(message.error)
-                        print(f"[agent-os] API error in stream: {message.error}", flush=True)
+                        log.warn("sdk_api_error", f"API error in stream: {message.error}", {"label": label})
 
                     for block in message.content:
                         if hasattr(block, "text"):
@@ -329,16 +321,15 @@ async def _run_query(
                         if hasattr(block, "is_error") and block.is_error:
                             tool_errors += 1
                             error_text = getattr(block, "text", str(block))
-                            print(f"[agent-os] Tool error: {error_text}", flush=True)
+                            log.warn("sdk_tool_error", f"Tool error: {error_text}", {"label": label})
 
                 elif isinstance(message, ResultMessage):
                     result_msg = message
-                    suffix = ""
-                    if tool_errors:
-                        suffix = f" ({tool_errors} tool error(s))"
-                    if api_errors:
-                        suffix += f" ({len(api_errors)} API error(s))"
-                    print(f"\n[agent-os] {label} complete: {message.subtype} ({message.num_turns} turns){suffix}")
+                    log.info(
+                        "sdk_complete",
+                        f"{label} complete: {message.subtype} ({message.num_turns} turns)",
+                        {"tool_errors": tool_errors, "api_errors": len(api_errors), "turns": message.num_turns},
+                    )
 
             return result_msg
 
@@ -353,16 +344,16 @@ async def _run_query(
             category, retryable = _error_classifier.classify(combined)
 
             if retryable and attempt < max_retries:
-                print(f"[agent-os] Transient error during {label}: {detail}", flush=True)
+                log.warn("sdk_transient_error", f"Transient error during {label}: {detail}")
                 continue
 
             if category == "permanent":
-                print(f"[agent-os] Permanent error during {label} — not retrying", flush=True)
+                log.error("sdk_permanent_error", f"Permanent error during {label} — not retrying")
             raise RuntimeError(f"SDK error during {label}: {detail}") from e
 
         except Exception as e:
             if result_msg is not None and _error_classifier.is_benign_cleanup(e):
-                print(f"[agent-os] Note: benign transport cleanup after {label} (result already received)", flush=True)
+                log.debug("sdk_cleanup", f"Benign transport cleanup after {label} (result already received)")
                 return result_msg
 
             last_exc = e
@@ -372,7 +363,7 @@ async def _run_query(
                 combined = f"{detail} {stderr_capture.text if stderr_capture else ''}"
                 _category, retryable = _error_classifier.classify(combined)
                 if retryable and attempt < max_retries:
-                    print(f"[agent-os] Transient error during {label}: {detail}", flush=True)
+                    log.warn("sdk_transient_error", f"Transient error during {label}: {detail}")
                     continue
 
             if isinstance(e, ExceptionGroup):
@@ -380,7 +371,7 @@ async def _run_query(
                 combined = f"{detail} {stderr_capture.text if stderr_capture else ''}"
                 _category, retryable = _error_classifier.classify(combined)
                 if retryable and attempt < max_retries:
-                    print(f"[agent-os] Transient error during {label}: {detail}", flush=True)
+                    log.warn("sdk_transient_error", f"Transient error during {label}: {detail}")
                     continue
 
             detail = _error_classifier.format_detail(e)
@@ -397,35 +388,24 @@ def _check_budget_gate(agent_id: str, mode: str, *, config: Config | None = None
     """Check aggregate budget and per-agent cap. Returns True if OK to proceed."""
     cfg = config or get_config()
 
+    log = get_logger(agent_id)
+
     budget = check_budget(config=cfg)
     if budget.circuit_breaker_tripped:
-        print(
-            f"[agent-os] BUDGET: ${budget.daily_spent:.2f} of ${budget.daily_cap:.2f} daily spent. "
-            f"Skipping {mode} for {agent_id}.",
-            flush=True,
-        )
-        aios.log_action(
-            agent_id,
+        log.warn(
             "budget_blocked",
-            f"Circuit breaker tripped — skipping {mode}",
-            {"daily_spent": budget.daily_spent, "daily_cap": budget.daily_cap},
-            config=cfg,
+            f"Circuit breaker tripped (${budget.daily_spent:.2f}/${budget.daily_cap:.2f}) — skipping {mode}",
+            {"daily_spent": budget.daily_spent, "daily_cap": budget.daily_cap, "mode": mode},
         )
         return False
 
     within, agent_spent = check_agent_budget(agent_id, config=cfg)
     if not within:
         cap = cfg.agent_daily_caps.get(agent_id, 0)
-        print(
-            f"[agent-os] BUDGET: {agent_id} at ${agent_spent:.2f} of ${cap:.2f} agent cap. Skipping {mode}.",
-            flush=True,
-        )
-        aios.log_action(
-            agent_id,
+        log.warn(
             "agent_budget_blocked",
-            f"Agent daily cap reached — skipping {mode}",
-            {"agent_spent": agent_spent, "agent_cap": cap},
-            config=cfg,
+            f"Agent daily cap reached (${agent_spent:.2f}/${cap:.2f}) — skipping {mode}",
+            {"agent_spent": agent_spent, "agent_cap": cap, "mode": mode},
         )
         return False
 
@@ -452,9 +432,12 @@ async def run_agent(
     composer = PromptComposer(config=cfg)
 
     agent_config = load_agent(agent_id, config=cfg)
-    print(f"[agent-os] Loaded agent: {agent_config.agent_id} ({agent_config.role})", flush=True)
-    print(f"[agent-os] Model: {agent_config.model}", flush=True)
-    print(f"[agent-os] Tools: {', '.join(agent_config.allowed_tools)}", flush=True)
+    log = get_logger(agent_id)
+    log.info(
+        "agent_loaded",
+        f"Loaded agent: {agent_config.agent_id} ({agent_config.role})",
+        {"model": agent_config.model, "tools": agent_config.allowed_tools},
+    )
 
     task_context = None
     task_meta = None
@@ -462,9 +445,9 @@ async def run_agent(
     if task_id:
         task_path = aios.claim_task(agent_config.agent_id, task_id, config=cfg)
         if not task_path:
-            print(f"[agent-os] ERROR: Could not claim task {task_id}")
+            log.error("claim_failed", f"Could not claim task {task_id}")
             sys.exit(1)
-        print(f"[agent-os] Claimed task: {task_path.name}", flush=True)
+        log.info("claimed_task", f"Claimed task: {task_path.name}", {"task_id": task_id})
 
         task_meta, task_body = aios._parse_frontmatter(task_path)
         task_context = task_path.read_text()
@@ -478,7 +461,7 @@ async def run_agent(
             config=cfg,
         )
     else:
-        print("[agent-os] ERROR: Must specify --task or --cycle")
+        log.error("no_mode", "Must specify --task or --cycle")
         sys.exit(1)
 
     system_prompt = composer.build_system_prompt(agent_config, task_context)
@@ -486,16 +469,9 @@ async def run_agent(
     os.environ.pop("CLAUDECODE", None)
     _ensure_api_key()
 
-    print("[agent-os] Invoking Claude...", flush=True)
-    aios.log_action(
-        agent_config.agent_id,
-        "sdk_invoke",
-        "Calling Claude Agent SDK",
-        {"model": agent_config.model, "task": task_id},
-        config=cfg,
-    )
+    log.info("sdk_invoke", "Invoking Claude Agent SDK", {"model": agent_config.model, "task": task_id})
 
-    stderr_capture = StderrCapture()
+    stderr_capture = StderrCapture(agent_id)
     options = _make_options(
         agent_config,
         system_prompt,
@@ -516,8 +492,7 @@ async def run_agent(
     except RuntimeError as e:
         error_detail = str(e)
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text, task=task_id)
-        print(f"[agent-os] ERROR: {error_detail}")
-        aios.log_action(agent_config.agent_id, "sdk_error", error_detail, {**error_refs, "task": task_id}, config=cfg)
+        log.error("sdk_error", error_detail, {**error_refs, "task": task_id})
         if task_id:
             aios.fail_task(task_id, error_detail, error_refs=error_refs, config=cfg)
         sys.exit(1)
@@ -528,78 +503,45 @@ async def run_agent(
         turns = result_msg.num_turns
 
         aios.log_cost(agent_config.agent_id, task_id, cost, duration, agent_config.model, turns, config=cfg)
-        aios.log_action(
-            agent_config.agent_id,
+        log.info(
             "sdk_complete",
             f"Done: ${cost:.4f}, {turns} turns, {duration}ms",
-            {"task": task_id, "cost_usd": cost, "turns": turns},
-            config=cfg,
+            {"task": task_id, "cost_usd": cost, "turns": turns, "duration_ms": duration},
         )
-
-        print(f"[agent-os] Cost: ${cost:.4f} | Turns: {turns} | Duration: {duration}ms", flush=True)
 
         if task_id and not result_msg.is_error:
             if agent_config.role in cfg.builder_roles and task_meta:
                 code_dir = _find_product_code_dir(task_meta, config=cfg)
                 if code_dir:
-                    print(f"[agent-os] Running quality gates on {code_dir}...", flush=True)
-                    aios.log_action(
-                        agent_config.agent_id,
-                        "quality_gates_start",
-                        f"Running pre-done checks on {code_dir}",
-                        {"task_id": task_id, "code_dir": str(code_dir)},
-                        config=cfg,
-                    )
+                    log.info("quality_gates_start", f"Running pre-done checks on {code_dir}", {"task_id": task_id})
 
                     gates_passed, gate_output = _run_quality_gates(code_dir, config=cfg)
                     print(gate_output, flush=True)
 
                     if gates_passed:
-                        aios.log_action(
-                            agent_config.agent_id,
-                            "quality_gates_passed",
-                            "All quality gates passed",
-                            {"task_id": task_id},
-                            config=cfg,
-                        )
+                        log.info("quality_gates_passed", "All quality gates passed", {"task_id": task_id})
                         aios.complete_task(task_id, config=cfg)
-                        aios.log_action(
-                            agent_config.agent_id,
-                            "completed_task",
-                            f"Completed {task_id}",
-                            {"task_id": task_id},
-                            config=cfg,
-                        )
-                        print(f"[agent-os] Task {task_id} moved to done/")
+                        log.info("completed_task", f"Completed {task_id}", {"task_id": task_id})
                     else:
-                        aios.log_action(
-                            agent_config.agent_id,
+                        log.error(
                             "quality_gates_failed",
                             "Quality gates failed — task moved to failed/",
                             {"task_id": task_id, "output": gate_output[:500]},
-                            config=cfg,
                         )
                         aios.fail_task(task_id, f"Quality gates failed:\n{gate_output[-1000:]}", config=cfg)
-                        print(f"[agent-os] Task {task_id} FAILED quality gates — moved to failed/")
                 else:
                     aios.complete_task(task_id, config=cfg)
-                    aios.log_action(
-                        agent_config.agent_id,
+                    log.info(
                         "completed_task",
-                        f"Completed {task_id} (no product code dir — quality gates skipped)",
+                        f"Completed {task_id} (quality gates: N/A)",
                         {"task_id": task_id},
-                        config=cfg,
                     )
-                    print(f"[agent-os] Task {task_id} moved to done/ (quality gates: N/A)")
             else:
                 aios.complete_task(task_id, config=cfg)
-                aios.log_action(
-                    agent_config.agent_id, "completed_task", f"Completed {task_id}", {"task_id": task_id}, config=cfg
-                )
-                print(f"[agent-os] Task {task_id} moved to done/")
+                log.info("completed_task", f"Completed {task_id}", {"task_id": task_id})
         elif task_id and result_msg.is_error:
             aios.fail_task(task_id, result_msg.result or "Agent returned error", config=cfg)
-            print(f"[agent-os] Task {task_id} moved to failed/")
+            log.error("task_failed", f"Task {task_id} moved to failed/", {"task_id": task_id})
 
 
 async def run_drive_consultation(
@@ -616,25 +558,18 @@ async def run_drive_consultation(
     agent_config = load_agent(agent_id, config=cfg)
     agent_key = agent_config.agent_id
 
+    log = get_logger(agent_key)
+
     # Idle-exit gate: skip if nothing has changed since last consultation
     proposals = aios.list_active_proposals(config=cfg)
     drives_mtime = cfg.drives_file.stat().st_mtime if cfg.drives_file.exists() else 0
     last_consultation = aios.get_last_cadence(agent_key, "drive-consultation", config=cfg)
     if not proposals and drives_mtime < last_consultation:
-        aios.log_action(
-            agent_key,
-            "drive_consultation_idle",
-            "No proposals or drive changes since last consultation",
-            config=cfg,
-        )
-        print(f"[agent-os] {agent_key}: drive consultation idle (no changes), skipping ($0)", flush=True)
+        log.info("drive_consultation_idle", "No proposals or drive changes since last consultation, skipping ($0)")
         return
 
     expected_at = _now_iso()  # Drive consultations run on cron schedule; expected = now
-    print(f"[agent-os] {agent_key}: running drive consultation...", flush=True)
-    aios.log_action(
-        agent_key, "drive_consultation_start", "Consulting drives (scheduled)", {"expected_at": expected_at}, config=cfg
-    )
+    log.info("drive_consultation_start", "Consulting drives (scheduled)", {"expected_at": expected_at})
 
     journal = aios.read_journal(agent_key, max_entries=5, config=cfg)
     journal_context = ""
@@ -665,7 +600,7 @@ async def run_drive_consultation(
     os.environ.pop("CLAUDECODE", None)
     _ensure_api_key()
 
-    stderr_capture = StderrCapture()
+    stderr_capture = StderrCapture(agent_key)
     options = _make_options(
         agent_config,
         system_prompt,
@@ -685,8 +620,7 @@ async def run_drive_consultation(
         )
     except RuntimeError as e:
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
-        print(f"[agent-os] ERROR in drive consultation: {e}", flush=True)
-        aios.log_action(agent_key, "drive_consultation_error", str(e), error_refs, config=cfg)
+        log.error("drive_consultation_error", str(e), error_refs)
         return
 
     if result_msg:
@@ -700,16 +634,13 @@ async def run_drive_consultation(
             result_msg.num_turns,
             config=cfg,
         )
-        aios.log_action(
-            agent_key,
+        log.info(
             "drive_consultation_complete",
             f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
             {"cost_usd": cost, "turns": result_msg.num_turns},
-            config=cfg,
         )
-        print(f"[agent-os] Cost: ${cost:.4f} | Turns: {result_msg.num_turns}", flush=True)
 
-    aios.log_action(agent_key, "drive_consultation_done", "Drive consultation finished", config=cfg)
+    log.info("drive_consultation_done", "Drive consultation finished")
 
 
 async def run_dream_cycle(
@@ -726,8 +657,8 @@ async def run_dream_cycle(
     agent_config = load_agent(agent_id, config=cfg)
     agent_key = agent_config.agent_id
 
-    print(f"[agent-os] {agent_key}: entering dream cycle...", flush=True)
-    aios.log_action(agent_key, "dream_start", "Entering dream cycle (nightly memory reorganization)", config=cfg)
+    log = get_logger(agent_key)
+    log.info("dream_start", "Entering dream cycle (nightly memory reorganization)")
 
     system_prompt = composer.build_system_prompt(agent_config)
 
@@ -737,9 +668,9 @@ async def run_dream_cycle(
     _ensure_api_key()
 
     dream_model = cfg.dream_model
-    print(f"[agent-os] Dream model: {dream_model}", flush=True)
+    log.debug("dream_model", f"Dream model: {dream_model}", {"model": dream_model})
 
-    stderr_capture = StderrCapture()
+    stderr_capture = StderrCapture(agent_key)
     options = _make_options(
         agent_config,
         system_prompt,
@@ -760,8 +691,7 @@ async def run_dream_cycle(
         )
     except RuntimeError as e:
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
-        print(f"[agent-os] ERROR in dream cycle: {e}", flush=True)
-        aios.log_action(agent_key, "dream_error", str(e), error_refs, config=cfg)
+        log.error("dream_error", str(e), error_refs)
         return
 
     if result_msg:
@@ -769,16 +699,13 @@ async def run_dream_cycle(
         aios.log_cost(
             agent_key, "dream-cycle", cost, result_msg.duration_ms, dream_model, result_msg.num_turns, config=cfg
         )
-        aios.log_action(
-            agent_key,
+        log.info(
             "dream_complete",
             f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
             {"cost_usd": cost, "turns": result_msg.num_turns},
-            config=cfg,
         )
-        print(f"[agent-os] Cost: ${cost:.4f} | Turns: {result_msg.num_turns}", flush=True)
 
-    aios.log_action(agent_key, "dream_done", "Dream cycle finished", config=cfg)
+    log.info("dream_done", "Dream cycle finished")
 
 
 def _emit_jsonl(data: dict) -> None:
@@ -926,13 +853,8 @@ async def run_thread_response(agent_id: str, pending_threads: list, *, config: C
     agent_config = load_agent(agent_id, config=cfg)
     agent_key = agent_config.agent_id
 
-    aios.log_action(
-        agent_key,
-        "thread_response_start",
-        f"Responding to {len(pending_threads)} thread(s)",
-        {"thread_count": len(pending_threads)},
-        config=cfg,
-    )
+    log = get_logger(agent_key)
+    log.info("thread_response_start", f"Responding to {len(pending_threads)} thread(s)", {"thread_count": len(pending_threads)})
 
     thread_lines = []
     for meta, _body, path in pending_threads:
@@ -950,7 +872,7 @@ async def run_thread_response(agent_id: str, pending_threads: list, *, config: C
     os.environ.pop("CLAUDECODE", None)
     _ensure_api_key()
 
-    stderr_capture = StderrCapture()
+    stderr_capture = StderrCapture(agent_key)
     options = _make_options(
         agent_config,
         system_prompt,
@@ -970,8 +892,7 @@ async def run_thread_response(agent_id: str, pending_threads: list, *, config: C
         )
     except RuntimeError as e:
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
-        print(f"[agent-os] ERROR in thread response: {e}")
-        aios.log_action(agent_key, "thread_response_error", str(e), error_refs, config=cfg)
+        log.error("thread_response_error", str(e), error_refs)
         return
 
     if result_msg:
@@ -985,14 +906,11 @@ async def run_thread_response(agent_id: str, pending_threads: list, *, config: C
             result_msg.num_turns,
             config=cfg,
         )
-        aios.log_action(
-            agent_key,
+        log.info(
             "thread_response_complete",
             f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
             {"cost_usd": cost, "turns": result_msg.num_turns},
-            config=cfg,
         )
-        print(f"[agent-os] Cost: ${cost:.4f} | Turns: {result_msg.num_turns}", flush=True)
 
 
 async def run_message_triage(agent_id: str, *, config: Config | None = None) -> None:
@@ -1003,18 +921,13 @@ async def run_message_triage(agent_id: str, *, config: Config | None = None) -> 
     agent_config = load_agent(agent_id, config=cfg)
     agent_key = agent_config.agent_id
 
+    log = get_logger(agent_key)
+
     inbox_msgs = aios.read_inbox(agent_key, config=cfg)
     if not inbox_msgs:
         return
 
-    print(f"[agent-os] {agent_key}: {len(inbox_msgs)} inbox message(s), triaging...", flush=True)
-    aios.log_action(
-        agent_key,
-        "message_triage_start",
-        f"Triaging {len(inbox_msgs)} message(s)",
-        {"count": len(inbox_msgs)},
-        config=cfg,
-    )
+    log.info("message_triage_start", f"Triaging {len(inbox_msgs)} message(s)", {"count": len(inbox_msgs)})
 
     msg_parts = []
     for meta, body, path in inbox_msgs:
@@ -1035,7 +948,7 @@ async def run_message_triage(agent_id: str, *, config: Config | None = None) -> 
     os.environ.pop("CLAUDECODE", None)
     _ensure_api_key()
 
-    stderr_capture = StderrCapture()
+    stderr_capture = StderrCapture(agent_key)
     options = _make_options(
         agent_config,
         system_prompt,
@@ -1056,8 +969,7 @@ async def run_message_triage(agent_id: str, *, config: Config | None = None) -> 
         )
     except RuntimeError as e:
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
-        print(f"[agent-os] ERROR in message triage: {e}")
-        aios.log_action(agent_key, "message_triage_error", str(e), error_refs, config=cfg)
+        log.error("message_triage_error", str(e), error_refs)
         return
 
     if result_msg:
@@ -1071,16 +983,10 @@ async def run_message_triage(agent_id: str, *, config: Config | None = None) -> 
             result_msg.num_turns,
             config=cfg,
         )
-        aios.log_action(
-            agent_key,
+        log.info(
             "message_triage_complete",
             f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
             {"cost_usd": cost, "turns": result_msg.num_turns, "model": cfg.message_triage_model},
-            config=cfg,
-        )
-        print(
-            f"[agent-os] Cost: ${cost:.4f} | Turns: {result_msg.num_turns} | Model: {cfg.message_triage_model}",
-            flush=True,
         )
 
 
@@ -1094,11 +1000,12 @@ async def run_cycle(
         return
 
     agent_config = load_agent(agent_id, config=cfg)
+    log = get_logger(agent_config.agent_id)
 
     next_task = aios._find_next_task(agent_config.agent_id, config=cfg)
     if next_task:
         task_id = next_task.stem
-        print(f"[agent-os] {agent_config.agent_id}: found task {task_id}, running...", flush=True)
+        log.info("cycle_task_found", f"Found task {task_id}, running...", {"task_id": task_id})
         await run_agent(agent_id, task_id=task_id, config=cfg, max_turns=max_turns, max_budget_usd=max_budget_usd)
         return
 
@@ -1109,16 +1016,13 @@ async def run_cycle(
 
     pending = aios.get_pending_threads(agent_config.agent_id, config=cfg)
     if pending:
-        print(f"[agent-os] {agent_config.agent_id}: {len(pending)} thread(s) need response, running...", flush=True)
+        log.info("cycle_threads", f"{len(pending)} thread(s) need response, running...", {"thread_count": len(pending)})
         await run_thread_response(agent_id, pending, config=cfg)
         return
 
     # Classify the idle cycle for health metrics
     cycle_type = _classify_idle_cycle(agent_config.agent_id, config=cfg)
-    aios.log_action(
-        agent_config.agent_id, "cycle_idle", "Nothing to do, exiting", {"cycle_type": cycle_type}, config=cfg
-    )
-    print(f"[agent-os] {agent_config.agent_id}: nothing to do ({cycle_type}), exiting", flush=True)
+    log.info("cycle_idle", f"Nothing to do ({cycle_type}), exiting", {"cycle_type": cycle_type})
 
 
 async def run_standing_orders(
@@ -1138,6 +1042,7 @@ async def run_standing_orders(
 
     agent_config = load_agent(agent_id, config=cfg)
     agent_key = agent_config.agent_id
+    log = get_logger(agent_key)
 
     # Read standing orders from agent registry metadata
     orders = agent_config.meta.get("standing_orders", {})
@@ -1152,26 +1057,20 @@ async def run_standing_orders(
 
         # Compute expected_at: last cadence time + cadence interval
         expected_at = _compute_expected_at(agent_key, order_name, cadence_hours, config=cfg)
-        print(f"[agent-os] {agent_key}: standing order '{order_name}' is due, running...", flush=True)
-        aios.log_action(
-            agent_key,
+        log.info(
             "standing_order_start",
             f"Running standing order: {order_name}",
             {"order": order_name, "cadence_hours": cadence_hours, "expected_at": expected_at},
-            config=cfg,
         )
 
         # Load prompt from file
         prompt_file = order_config.get("prompt_file", "")
         prompt_path = cfg.agents_dir / prompt_file
         if not prompt_path.exists():
-            print(f"[agent-os] ERROR: Standing order prompt file not found: {prompt_path}")
-            aios.log_action(
-                agent_key,
+            log.error(
                 "standing_order_error",
                 f"Prompt file not found: {prompt_path}",
                 {"order": order_name},
-                config=cfg,
             )
             continue
 
@@ -1189,19 +1088,19 @@ async def run_standing_orders(
         system_prompt = composer.build_system_prompt(agent_config) + journal_context
 
         os.environ.pop("CLAUDECODE", None)
-        _ensure_api_key()
 
-        stderr_capture = StderrCapture()
-        options = _make_options(
-            agent_config,
-            system_prompt,
-            config=cfg,
-            max_turns=max_turns or cfg.standing_orders_max_turns,
-            max_budget_usd=max_budget_usd or cfg.standing_orders_max_budget_usd,
-            stderr_capture=stderr_capture,
-        )
-
+        stderr_capture = StderrCapture(agent_key)
         try:
+            _ensure_api_key()
+            options = _make_options(
+                agent_config,
+                system_prompt,
+                config=cfg,
+                max_turns=max_turns or cfg.standing_orders_max_turns,
+                max_budget_usd=max_budget_usd or cfg.standing_orders_max_budget_usd,
+                stderr_capture=stderr_capture,
+            )
+
             result_msg = await _run_query(
                 order_prompt,
                 options,
@@ -1211,8 +1110,10 @@ async def run_standing_orders(
             )
         except RuntimeError as e:
             error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text, order=order_name)
-            print(f"[agent-os] ERROR in standing order '{order_name}': {e}")
-            aios.log_action(agent_key, "standing_order_error", str(e), {**error_refs, "order": order_name}, config=cfg)
+            log.error("standing_order_error", f"Error in standing order '{order_name}': {e}", {**error_refs, "order": order_name})
+            # Mark cadence even on error to prevent infinite retry loops.
+            # The order will be retried after the normal cadence interval.
+            aios.mark_cadence(agent_key, order_name, config=cfg)
             continue
 
         if result_msg:
@@ -1226,14 +1127,11 @@ async def run_standing_orders(
                 result_msg.num_turns,
                 config=cfg,
             )
-            aios.log_action(
-                agent_key,
+            log.info(
                 "standing_order_complete",
                 f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
-                {"order": order_name, "cost_usd": cost},
-                config=cfg,
+                {"order": order_name, "cost_usd": cost, "turns": result_msg.num_turns},
             )
-            print(f"[agent-os] Cost: ${cost:.4f} | Turns: {result_msg.num_turns}", flush=True)
 
         aios.mark_cadence(agent_key, order_name, config=cfg)
 

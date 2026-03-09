@@ -368,7 +368,13 @@ def mark_processed(msg_path: Path, *, config: Config | None = None) -> None:
 
 
 def log_action(
-    agent_id: str, action: str, detail: str, refs: dict | None = None, *, config: Config | None = None
+    agent_id: str,
+    action: str,
+    detail: str,
+    refs: dict | None = None,
+    *,
+    level: str = "info",
+    config: Config | None = None,
 ) -> None:
     """Append a JSONL log entry for an agent."""
     cfg = config or get_config()
@@ -379,6 +385,7 @@ def log_action(
     entry = {
         "timestamp": _now_iso(config=cfg),
         "agent": agent_id,
+        "level": level,
         "action": action,
         "detail": detail,
         "refs": refs or {},
