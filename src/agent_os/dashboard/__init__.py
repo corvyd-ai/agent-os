@@ -2,5 +2,9 @@
 
 Install with: pip install agent-os[dashboard]
 
-This sub-package is a placeholder for the dashboard functionality.
+Launch: agent-os dashboard
 """
+
+from .app import app
+
+__all__ = ["app"]

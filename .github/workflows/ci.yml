@@ -50,10 +50,32 @@ jobs:
       - name: Run tests
         run: pytest -v --tb=short
 
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: dashboard/frontend
+        run: npm ci
+
+      - name: TypeScript check
+        working-directory: dashboard/frontend
+        run: npx tsc -b
+
+      - name: Build
+        working-directory: dashboard/frontend
+        run: npm run build
+
   build:
     name: Build package
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, frontend]
     steps:
       - uses: actions/checkout@v4
 

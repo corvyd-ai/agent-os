@@ -82,6 +82,15 @@ class Config:
     # Directory for company-specific template overrides (searched before package defaults)
     prompts_override_dir: Path | None = None
 
+    # Dashboard settings
+    dashboard_agent_ids: list[str] = field(default_factory=list)
+    conversations_dir: Path | None = None
+
+    # --- Logging ---
+    log_level: str = "info"  # debug, info, warn, error
+    log_also_print: bool = True  # also print to stdout (for cron log capture)
+    log_retention_days: int = 30  # days to keep JSONL log files before archival
+
     # --- Aggregate budget caps (circuit breaker) ---
     daily_budget_cap_usd: float = 100.00
     weekly_budget_cap_usd: float = 500.00
@@ -293,6 +302,23 @@ class Config:
             override = Path(prompts["override_dir"])
             kwargs["prompts_override_dir"] = override if override.is_absolute() else toml_dir / override
 
+        # [dashboard]
+        dashboard = data.get("dashboard", {})
+        if "agent_ids" in dashboard:
+            kwargs["dashboard_agent_ids"] = list(dashboard["agent_ids"])
+        if "conversations_dir" in dashboard:
+            conv_dir = Path(dashboard["conversations_dir"])
+            kwargs["conversations_dir"] = conv_dir if conv_dir.is_absolute() else toml_dir / conv_dir
+
+        # [logging]
+        logging_cfg = data.get("logging", {})
+        if "level" in logging_cfg:
+            kwargs["log_level"] = logging_cfg["level"]
+        if "also_print" in logging_cfg:
+            kwargs["log_also_print"] = bool(logging_cfg["also_print"])
+        if "retention_days" in logging_cfg:
+            kwargs["log_retention_days"] = int(logging_cfg["retention_days"])
+
         # [feedback_routing]
         fr = data.get("feedback_routing", {})
         if fr:
@@ -427,6 +453,25 @@ class Config:
     def scheduler_state_file(self) -> Path:
         return self.operations_dir / "scheduler-state.json"
 
+    # Strategy
+    @property
+    def strategy_dir(self) -> Path:
+        return self.company_root / "strategy"
+
+    @property
+    def decisions_dir(self) -> Path:
+        return self.strategy_dir / "decisions"
+
+    # Human inbox
+    @property
+    def human_inbox(self) -> Path:
+        return self.messages_dir / "human" / "inbox"
+
+    # Dashboard conversations
+    @property
+    def conversations_dir_resolved(self) -> Path:
+        return self.conversations_dir or (self.company_root / "agents" / "conversations")
+
     # Quality gate script
     @property
     def pre_done_checks_script(self) -> Path:
@@ -450,6 +495,34 @@ def configure(config: Config) -> None:
     """Replace the global Config singleton. Typically used in tests."""
     global _config
     _config = config
+
+
+def load_dotenv(root: Path) -> None:
+    """Load a .env file from the project root into os.environ.
+
+    Only sets variables that are not already in the environment (env vars
+    take precedence over .env values). Supports KEY=VALUE lines, quoted
+    values, comments, and blank lines. No external dependencies.
+    """
+    env_file = root / ".env"
+    if not env_file.exists():
+        return
+
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Strip matching quotes
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        # Don't override existing env vars
+        if key not in os.environ:
+            os.environ[key] = value
 
 
 # --- Backward compatibility shim ---

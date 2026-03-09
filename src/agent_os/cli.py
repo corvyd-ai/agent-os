@@ -471,9 +471,19 @@ def cmd_cron(args):
 
 def cmd_dashboard(args):
     """Launch the agent-os dashboard."""
-    print("Dashboard is not yet included in this package.")
-    print("See https://github.com/corvyd-ai/agent-os for updates.")
-    sys.exit(0)
+    _set_root(args)
+
+    try:
+        import uvicorn
+    except ImportError:
+        print("Dashboard dependencies not installed.")
+        print("Run: pip install agent-os[dashboard]")
+        sys.exit(1)
+
+    host = getattr(args, "host", "127.0.0.1")
+    port = getattr(args, "port", 8787)
+    print(f"Starting agent-os dashboard on http://{host}:{port}")
+    uvicorn.run("agent_os.dashboard.app:app", host=host, port=port, reload=True)
 
 
 # --- helpers ---
@@ -481,7 +491,7 @@ def cmd_dashboard(args):
 
 def _set_root(args):
     """Set up Config from --config TOML file, --root flag, or defaults."""
-    from .config import Config, configure
+    from .config import Config, configure, load_dotenv
 
     config_path = getattr(args, "config", None)
     root = getattr(args, "root", None)
@@ -498,6 +508,9 @@ def _set_root(args):
             # Fallback to root-only config
             resolved = Path(root).resolve() if root else Path.cwd()
             cfg = Config(company_root=resolved)
+
+    # Load .env from project root (before anything checks env vars)
+    load_dotenv(cfg.company_root)
 
     # Also set env var for any subprocess that might need it
     os.environ["AGENT_OS_ROOT"] = str(cfg.company_root)
@@ -622,6 +635,9 @@ def main():
 
     # dashboard
     p_dash = subparsers.add_parser("dashboard", help="Launch the dashboard")
+    p_dash.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    p_dash.add_argument("--port", type=int, default=8787, help="Port (default: 8787)")
+    _add_common_args(p_dash)
     p_dash.set_defaults(func=cmd_dashboard)
 
     args = parser.parse_args()
