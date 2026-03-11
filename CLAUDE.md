@@ -1,0 +1,286 @@
+# agent-os — Claude Code Context
+
+agent-os is a file-based operating system for AI-native organizations. Everything is a file — tasks, decisions, messages, knowledge, agent state. The filesystem is the shared brain. Agents run on cron, check for work, act, and exit. No daemons, no databases — just files, git, and Unix.
+
+## Quick Start
+
+Clone the repo and run Claude Code:
+```
+cd agent-os
+claude
+>>> /setup
+```
+
+The `/setup` skill walks you through installation, initialization, and first agent run.
+
+## Development
+
+```bash
+# Install (editable, with dev deps)
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Lint
+ruff check src/ tests/
+
+# Format
+ruff format src/ tests/
+
+# Type check
+pyright src/
+
+# Build wheel
+python -m build
+```
+
+## Source Layout
+
+```
+src/agent_os/
+  cli.py          # CLI entry point (agent-os command)
+  config.py       # Config dataclass + TOML parsing
+  runner.py       # Agent cycle runner (task/message/thread dispatch)
+  composer.py     # Prompt composition (4-layer attention model)
+  core.py         # File operations (tasks, messages, broadcasts, IDs)
+  prompts/        # Default Jinja2 templates (preamble, interactive, quality gates)
+  dashboard/      # Dashboard backend (FastAPI)
+dashboard/
+  frontend/       # Dashboard frontend (React/Vite)
+  Makefile         # Dev server commands
+  screenshot.py   # Visual testing tool
+examples/
+  mini-company/   # Reference implementation of a company filesystem
+tests/            # pytest suite
+```
+
+## Key Entry Points
+
+| File | What it does |
+|------|-------------|
+| `src/agent_os/cli.py` | All CLI commands: `init`, `cycle`, `run`, `cron`, `budget`, `task`, `drives`, `dream`, `standing-orders`, `dashboard` |
+| `src/agent_os/config.py` | `Config` dataclass, `Config.from_toml()`, `Config.discover_toml()` — TOML schema definition |
+| `src/agent_os/runner.py` | `run_cycle()` — the main loop: check tasks, messages, threads, exit if idle |
+| `src/agent_os/composer.py` | `compose_system_prompt()` — builds the 4-layer attention prompt |
+| `src/agent_os/core.py` | All file operations: `create_task()`, `send_message()`, `post_broadcast()`, `next_id()`, `claim_task()`, `complete_task()` |
+
+## Available Skills
+
+| Skill | Description |
+|-------|-------------|
+| `/setup` | Guided first-time installation and configuration |
+| `/add-agent` | Create a new agent definition with registry file and state directories |
+| `/create-task` | Create a properly formatted task for an agent |
+| `/send-message` | Send a direct message to an agent's inbox |
+| `/broadcast` | Post a company-wide broadcast announcement |
+| `/create-proposal` | Create a governance proposal for agent deliberation |
+| `/record-decision` | Record a decision in the decision log |
+| `/start-thread` | Start a multi-agent discussion thread |
+| `/check-status` | View system status: agents, tasks, budgets, health |
+
+## Conventions
+
+### File Format
+
+All structured files use YAML frontmatter + markdown body:
+
+```
+---
+id: item-2026-0308-001
+title: "Example"
+created: 2026-03-08T10:00:00Z
+---
+
+Markdown body content here.
+```
+
+### ID Generation
+
+Sequential within date prefix: `{type}-YYYY-MMDD-NNN`
+
+Scan the target directory (and all lifecycle directories for tasks) for existing files with the same date prefix, then increment. Examples:
+- `task-2026-0308-001`, `task-2026-0308-002`
+- `msg-2026-0308-001`
+- `broadcast-2026-0308-001`
+
+### Frontmatter Schemas
+
+**Task** (`agents/tasks/{status}/*.md`):
+```yaml
+id: task-2026-0308-001
+title: "Task title"
+created: 2026-03-08T10:00:00Z
+created_by: human  # or agent-id
+assigned_to: agent-001-builder  # agent-id, "" for unassigned, or "human"
+priority: medium  # low, medium, high, critical
+status: queued  # queued, in-progress, in-review, done, failed, declined
+tags: [feature, mvp]
+depends_on: []  # task IDs that must be done first
+outcome: ""  # success, partial, failure, cancelled (set on completion)
+```
+
+**Message** (`agents/messages/{agent-id}/inbox/*.md`):
+```yaml
+id: msg-2026-0308-001
+from: human  # or agent-id
+to: agent-001-builder
+date: 2026-03-08T10:00:00Z
+subject: "Subject line"
+urgency: normal  # normal, high, critical
+requires_response: false
+thread: ""  # optional thread-id reference
+```
+
+**Broadcast** (`agents/messages/broadcast/*.md`):
+```yaml
+id: broadcast-2026-0308-001
+from: human  # or agent-id
+date: 2026-03-08T10:00:00Z
+subject: "Subject line"
+```
+
+**Thread** (`agents/messages/threads/*.md`):
+```yaml
+id: thread-2026-0308-001
+topic: "Discussion topic"
+started_by: human  # or agent-id
+participants: [agent-001-builder, agent-003-operator]
+started: 2026-03-08T10:00:00Z
+status: active  # active, resolved
+```
+
+Thread body uses `## {agent-id} — {timestamp}` headers separated by `---`.
+
+**Proposal** (`strategy/proposals/active/*.md`):
+```yaml
+id: proposal-2026-0308-001
+title: "Proposal title"
+proposed_by: human  # or agent-id
+date: 2026-03-08
+status: active  # active, approved, blocked, rejected
+created: 2026-03-08T10:00:00Z
+```
+
+**Decision** (`strategy/decisions/*.md`):
+```yaml
+id: decision-2026-0308-001
+title: "Decision title"
+decided_by: human  # or agent-id
+date: 2026-03-08
+status: decided
+created: 2026-03-08T10:00:00Z
+```
+
+**Agent Registry** (`agents/registry/*.md`):
+```yaml
+id: agent-001-builder
+name: The Builder
+role: Software Engineer
+model: claude-sonnet-4-6
+tools:
+  - Bash
+  - Read
+  - Write
+  - Edit
+  - Glob
+  - Grep
+```
+
+Body contains identity description, core capabilities, and drives in markdown.
+
+### Directory Structure
+
+```
+<company>/
+  agents/
+    registry/              # Agent definition files
+    state/<agent-id>/      # Per-agent state
+      soul.md              # Layer 0 — inner life, rarely changes
+      working-memory.md    # Layer 1 — curated worldview, updated each cycle
+      old-memories.md      # Long-term storage (dream cycles)
+    tasks/
+      queued/              # Ready to claim
+      in-progress/         # Being worked on
+      in-review/           # Awaiting review
+      done/                # Completed
+      failed/              # Failed
+      backlog/             # Awaiting human promotion
+      declined/            # Rejected
+    messages/
+      broadcast/           # Company-wide announcements
+      threads/             # Multi-agent discussions
+      <agent-id>/inbox/    # Direct messages to agent
+    logs/<agent-id>/       # Daily JSONL activity logs + journal.md
+  strategy/
+    drives.md              # Persistent company goals
+    current-focus.md       # Current priority
+    decisions/             # Append-only decision records
+    proposals/
+      active/              # Open proposals
+      decided/             # Closed proposals
+  identity/
+    values.md              # Company values
+    principles.md          # Operating principles
+  finance/costs/           # Cost tracking JSONL
+  products/                # Product-specific files
+  knowledge/               # Shared knowledge base
+  operations/scripts/      # Operational scripts
+```
+
+### Task Lifecycle
+
+Tasks move between directories — the directory IS the status:
+`queued/` → `in-progress/` → `done/` (or `failed/`, `in-review/`)
+
+Agents with medium autonomy create tasks in `backlog/` (requires human `promote_task` to move to `queued/`).
+
+### Configuration
+
+`agent-os.toml` lives alongside the company directory. Key sections:
+
+```toml
+[company]
+name = "Company Name"
+root = "."
+timezone = "UTC"
+
+[runtime]
+model = "claude-sonnet-4-6"
+
+[budget]
+task = 5.00
+standing_orders = 2.00
+drive_consultation = 1.50
+dream = 1.50
+daily_cap = 100.00
+weekly_cap = 500.00
+monthly_cap = 2000.00
+
+[schedule]
+enabled = true
+[schedule.cycles]
+enabled = true
+interval_minutes = 15
+
+[prompts]
+override_dir = "prompts"
+
+[dashboard]
+agent_ids = []
+```
+
+Full schema: see `src/agent_os/config.py` `Config` dataclass.
+
+### Config Discovery
+
+1. `--config` CLI flag
+2. `AGENT_OS_CONFIG` env var
+3. Walk up from `AGENT_OS_ROOT`
+4. Walk up from cwd
+
+### Autonomy Levels
+
+- **low** — Cannot create tasks
+- **medium** — Tasks go to `backlog/` (human must promote)
+- **high** — Tasks go directly to `queued/`
