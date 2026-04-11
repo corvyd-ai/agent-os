@@ -45,12 +45,14 @@ async def daily_costs(days: int = Query(7, description="Number of days to show")
             total += cost
             invocations += 1
 
-        result.append({
-            "date": date_str,
-            "total": round(total, 4),
-            "invocations": invocations,
-            "by_agent": {k: round(v, 4) for k, v in sorted(by_agent.items())},
-        })
+        result.append(
+            {
+                "date": date_str,
+                "total": round(total, 4),
+                "invocations": invocations,
+                "by_agent": {k: round(v, 4) for k, v in sorted(by_agent.items())},
+            }
+        )
 
     result.reverse()  # Chronological order
     return result
@@ -91,10 +93,7 @@ async def cost_summary(days: int = Query(7)):
         "days": days,
         "invocations": total_invocations,
         "avg_daily": round(total / max(days, 1), 4),
-        "by_agent": {
-            k: {"total": round(v, 4), "name": _short_name(k)}
-            for k, v in sorted(by_agent.items())
-        },
+        "by_agent": {k: {"total": round(v, 4), "name": _short_name(k)} for k, v in sorted(by_agent.items())},
         "by_task_type": {k: round(v, 4) for k, v in sorted(by_task_type.items(), key=lambda x: -x[1])},
         "daily_totals": daily_totals,
     }

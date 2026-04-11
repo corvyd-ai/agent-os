@@ -240,9 +240,7 @@ async def get_autonomy():
 
     return {
         "default_level": default_level,
-        "agents": {
-            agent_id: agents.get(agent_id, default_level) for agent_id in agent_ids
-        },
+        "agents": {agent_id: agents.get(agent_id, default_level) for agent_id in agent_ids},
     }
 
 
@@ -284,15 +282,17 @@ async def get_backlog():
             meta = yaml.safe_load(parts[1]) or {}
         except yaml.YAMLError:
             continue
-        items.append({
-            "id": meta.get("id", f.stem),
-            "title": meta.get("title", "Untitled"),
-            "created_by": meta.get("created_by", "unknown"),
-            "assigned_to": meta.get("assigned_to", ""),
-            "priority": meta.get("priority", "medium"),
-            "created_at": meta.get("created_at", ""),
-            "body": parts[2].strip()[:500],
-        })
+        items.append(
+            {
+                "id": meta.get("id", f.stem),
+                "title": meta.get("title", "Untitled"),
+                "created_by": meta.get("created_by", "unknown"),
+                "assigned_to": meta.get("assigned_to", ""),
+                "priority": meta.get("priority", "medium"),
+                "created_at": meta.get("created_at", ""),
+                "body": parts[2].strip()[:500],
+            }
+        )
 
     # Sort by priority
     priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}

@@ -37,11 +37,13 @@ def _parse_responses(body: str) -> list[dict]:
     # Match ## agent-id — ISO-datetime sections
     pattern = r"^## (.+?) — (\d{4}-\d{2}-\d{2}T[\d:.+Z-]+)\s*\n(.*?)(?=^## |\Z)"
     for m in re.finditer(pattern, body, re.MULTILINE | re.DOTALL):
-        responses.append({
-            "author": m.group(1).strip(),
-            "timestamp": m.group(2).strip(),
-            "text": m.group(3).strip(),
-        })
+        responses.append(
+            {
+                "author": m.group(1).strip(),
+                "timestamp": m.group(2).strip(),
+                "text": m.group(3).strip(),
+            }
+        )
     return responses
 
 

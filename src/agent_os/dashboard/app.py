@@ -32,7 +32,7 @@ app.include_router(messages.router)
 app.include_router(health.router)
 app.include_router(conversation.router)
 app.include_router(feedback.router)  # legacy /api/feedback routes (backward compat)
-app.include_router(notes.router)    # new /api/notes routes
+app.include_router(notes.router)  # new /api/notes routes
 app.include_router(controls.router)  # schedule, budget, autonomy, backlog controls
 
 

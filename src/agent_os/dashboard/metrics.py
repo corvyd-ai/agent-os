@@ -168,6 +168,7 @@ def _parse_ts(value) -> datetime | None:
 # A. Autonomy Score
 # ---------------------------------------------------------------------------
 
+
 def compute_autonomy(agent_id: str, days: int) -> dict:
     """Compute autonomy metrics for a single agent.
 
@@ -192,7 +193,8 @@ def compute_autonomy(agent_id: str, days: int) -> dict:
 
     # Tasks completed by this agent in the period
     done_by_agent = [
-        t for t in all_tasks
+        t
+        for t in all_tasks
         if t.get("_status") == "done"
         and _normalize_agent(t.get("assigned_to", "")) == agent_id
         and _is_within_period(t, cutoff)
@@ -200,17 +202,15 @@ def compute_autonomy(agent_id: str, days: int) -> dict:
 
     # Human tasks created by this agent
     human_tasks = [
-        t for t in all_tasks
+        t
+        for t in all_tasks
         if t.get("assigned_to") == "human"
         and _normalize_agent(t.get("created_by", "")) == agent_id
         and _is_within_period(t, cutoff)
     ]
 
     # Self-initiated: created_by == assigned_to (drive-initiated work)
-    self_initiated = [
-        t for t in done_by_agent
-        if _normalize_agent(t.get("created_by", "")) == agent_id
-    ]
+    self_initiated = [t for t in done_by_agent if _normalize_agent(t.get("created_by", "")) == agent_id]
 
     total_completed = len(done_by_agent)
     escalation_rate = _safe_ratio(len(human_tasks), max(total_completed, 1))
@@ -232,12 +232,7 @@ def compute_autonomy(agent_id: str, days: int) -> dict:
     # Lower escalation = more autonomous
     # Higher self-initiated = more autonomous
     # Higher decision autonomy = more autonomous
-    composite = (
-        productive_ratio * 30
-        + (1 - escalation_rate) * 25
-        + self_initiated_ratio * 20
-        + decision_autonomy * 25
-    )
+    composite = productive_ratio * 30 + (1 - escalation_rate) * 25 + self_initiated_ratio * 20 + decision_autonomy * 25
     score = _clamp(composite * 100 / 100)  # already 0-100 weighted sum
 
     return {
@@ -274,6 +269,7 @@ def _is_decision_within_period(decision: dict, cutoff: datetime) -> bool:
 # B. Task Effectiveness
 # ---------------------------------------------------------------------------
 
+
 def compute_effectiveness(agent_id: str, days: int) -> dict:
     """Compute task effectiveness metrics for a single agent.
 
@@ -286,9 +282,7 @@ def compute_effectiveness(agent_id: str, days: int) -> dict:
     cutoff = now - timedelta(days=days)
 
     agent_tasks = [
-        t for t in all_tasks
-        if _normalize_agent(t.get("assigned_to", "")) == agent_id
-        and _is_within_period(t, cutoff)
+        t for t in all_tasks if _normalize_agent(t.get("assigned_to", "")) == agent_id and _is_within_period(t, cutoff)
     ]
 
     done = [t for t in agent_tasks if t.get("_status") == "done"]
@@ -300,9 +294,9 @@ def compute_effectiveness(agent_id: str, days: int) -> dict:
     # Velocity: estimate from cost log durations for this agent's tasks
     costs = _collect_costs(days)
     agent_task_costs = [
-        c for c in costs
-        if _normalize_agent(c.get("agent", "")) == agent_id
-        and (c.get("task") or "").startswith("task-")
+        c
+        for c in costs
+        if _normalize_agent(c.get("agent", "")) == agent_id and (c.get("task") or "").startswith("task-")
     ]
     durations = [c.get("duration_ms", 0) for c in agent_task_costs if c.get("duration_ms", 0) > 0]
     mean_duration_ms = _safe_ratio(sum(durations), len(durations)) if durations else 0
@@ -315,9 +309,7 @@ def compute_effectiveness(agent_id: str, days: int) -> dict:
     # Duration score: faster is better, cap at 10min ideal
     duration_score = 1.0 - min(mean_duration_ms / (30 * 60 * 1000), 1.0) if mean_duration_ms > 0 else 0.5
 
-    score = _clamp(
-        completion_rate * 40 + throughput_score * 30 + duration_score * 30
-    )
+    score = _clamp(completion_rate * 40 + throughput_score * 30 + duration_score * 30)
 
     return {
         "score": round(score, 1),
@@ -333,6 +325,7 @@ def compute_effectiveness(agent_id: str, days: int) -> dict:
 # ---------------------------------------------------------------------------
 # C. Cycle Efficiency
 # ---------------------------------------------------------------------------
+
 
 def compute_efficiency(agent_id: str, days: int) -> dict:
     """Compute cost efficiency metrics for a single agent.
@@ -360,9 +353,7 @@ def compute_efficiency(agent_id: str, days: int) -> dict:
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=days)
     done_by_agent = [
-        t for t in all_tasks
-        if _normalize_agent(t.get("assigned_to", "")) == agent_id
-        and _is_within_period(t, cutoff)
+        t for t in all_tasks if _normalize_agent(t.get("assigned_to", "")) == agent_id and _is_within_period(t, cutoff)
     ]
 
     cost_per_task = _safe_ratio(task_total_cost, len(done_by_agent))
@@ -379,9 +370,7 @@ def compute_efficiency(agent_id: str, days: int) -> dict:
     idle_score = 1.0 - idle_cost_ratio
     turn_efficiency = 1.0 - min(cost_per_turn / 0.15, 1.0) if cost_per_turn > 0 else 0.5
 
-    score = _clamp(
-        cost_score * 35 + idle_score * 35 + turn_efficiency * 30
-    )
+    score = _clamp(cost_score * 35 + idle_score * 35 + turn_efficiency * 30)
 
     return {
         "score": round(score, 1),
@@ -399,6 +388,7 @@ def compute_efficiency(agent_id: str, days: int) -> dict:
 # ---------------------------------------------------------------------------
 # D. Governance Health
 # ---------------------------------------------------------------------------
+
 
 def compute_governance(days: int) -> dict:
     """Compute governance metrics (system-wide, not per-agent).
@@ -444,7 +434,9 @@ def compute_governance(days: int) -> dict:
                 if 0 < delta < 168:  # Sanity: < 1 week
                     response_times_hours.append(delta)
 
-    mean_response_hours = _safe_ratio(sum(response_times_hours), len(response_times_hours)) if response_times_hours else 0
+    mean_response_hours = (
+        _safe_ratio(sum(response_times_hours), len(response_times_hours)) if response_times_hours else 0
+    )
 
     # Score
     throughput_score = proposal_throughput  # 0-1
@@ -475,6 +467,7 @@ def compute_governance(days: int) -> dict:
 # E. System Health
 # ---------------------------------------------------------------------------
 
+
 def compute_system_health(agent_id: str, days: int) -> dict:
     """Compute system health metrics for a single agent.
 
@@ -494,9 +487,9 @@ def compute_system_health(agent_id: str, days: int) -> dict:
     # Cost-log based standing orders
     costs = _collect_costs(days)
     agent_standing_costs = [
-        c for c in costs
-        if _normalize_agent(c.get("agent", "")) == agent_id
-        and (c.get("task") or "").startswith("standing-order")
+        c
+        for c in costs
+        if _normalize_agent(c.get("agent", "")) == agent_id and (c.get("task") or "").startswith("standing-order")
     ]
 
     # Schedule adherence: how many days had at least one activity?
@@ -524,7 +517,9 @@ def compute_system_health(agent_id: str, days: int) -> dict:
                     recovery_times_minutes.append(delta)
                 last_error_ts = None
 
-    mean_recovery_min = _safe_ratio(sum(recovery_times_minutes), len(recovery_times_minutes)) if recovery_times_minutes else 0
+    mean_recovery_min = (
+        _safe_ratio(sum(recovery_times_minutes), len(recovery_times_minutes)) if recovery_times_minutes else 0
+    )
 
     # Score
     error_score = 1.0 - min(error_rate * 10, 1.0)  # 10% errors = 0 score
@@ -532,9 +527,7 @@ def compute_system_health(agent_id: str, days: int) -> dict:
     # Recovery: < 15min = perfect, > 2h = poor
     recovery_score = 1.0 - min(mean_recovery_min / 120, 1.0) if mean_recovery_min > 0 else 1.0  # No errors = perfect
 
-    score = _clamp(
-        (error_score * 40 + adherence_score * 35 + recovery_score * 25) * 100 / 100
-    )
+    score = _clamp((error_score * 40 + adherence_score * 35 + recovery_score * 25) * 100 / 100)
 
     return {
         "score": round(score, 1),
@@ -553,6 +546,7 @@ def compute_system_health(agent_id: str, days: int) -> dict:
 # Aggregation — per-agent and system-wide
 # ---------------------------------------------------------------------------
 
+
 def compute_agent_health(agent_id: str, days: int) -> dict:
     """Compute all health metrics for a single agent."""
     autonomy = compute_autonomy(agent_id, days)
@@ -562,10 +556,7 @@ def compute_agent_health(agent_id: str, days: int) -> dict:
 
     # Composite score: weighted average of all agent-level scores
     composite = (
-        autonomy["score"] * 0.25
-        + effectiveness["score"] * 0.30
-        + efficiency["score"] * 0.20
-        + system["score"] * 0.25
+        autonomy["score"] * 0.25 + effectiveness["score"] * 0.30 + efficiency["score"] * 0.20 + system["score"] * 0.25
     )
 
     return {

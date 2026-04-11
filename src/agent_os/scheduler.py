@@ -247,13 +247,17 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
                 record = DispatchRecord(type="cycle", agent=agent_id, at=now_iso)
                 try:
-                    get_logger("system").info("tick_dispatch", f"Dispatching cycle for {agent_id}", {"type": "cycle", "agent": agent_id})
+                    get_logger("system").info(
+                        "tick_dispatch", f"Dispatching cycle for {agent_id}", {"type": "cycle", "agent": agent_id}
+                    )
                     await runner.run_cycle(agent_id, config=cfg)
                     record.result = "done"
                     _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
                 except Exception as e:
                     record.result = f"error: {e}"
-                    get_logger("system").error("tick_error", f"Error in cycle for {agent_id}: {e}", {"type": "cycle", "agent": agent_id})
+                    get_logger("system").error(
+                        "tick_error", f"Error in cycle for {agent_id}: {e}", {"type": "cycle", "agent": agent_id}
+                    )
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -270,13 +274,21 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
                 record = DispatchRecord(type="standing_orders", agent=agent_id, at=now_iso)
                 try:
-                    get_logger("system").info("tick_dispatch", f"Dispatching standing orders for {agent_id}", {"type": "standing_orders", "agent": agent_id})
+                    get_logger("system").info(
+                        "tick_dispatch",
+                        f"Dispatching standing orders for {agent_id}",
+                        {"type": "standing_orders", "agent": agent_id},
+                    )
                     await runner.run_standing_orders(agent_id, config=cfg)
                     record.result = "done"
                     _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
                 except Exception as e:
                     record.result = f"error: {e}"
-                    get_logger("system").error("tick_error", f"Error in standing orders for {agent_id}: {e}", {"type": "standing_orders", "agent": agent_id})
+                    get_logger("system").error(
+                        "tick_error",
+                        f"Error in standing orders for {agent_id}: {e}",
+                        {"type": "standing_orders", "agent": agent_id},
+                    )
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -293,12 +305,18 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
                 record = DispatchRecord(type="drives", agent=agent_id, at=now_iso)
                 try:
-                    get_logger("system").info("tick_dispatch", f"Dispatching drive consultation for {agent_id}", {"type": "drives", "agent": agent_id})
+                    get_logger("system").info(
+                        "tick_dispatch",
+                        f"Dispatching drive consultation for {agent_id}",
+                        {"type": "drives", "agent": agent_id},
+                    )
                     await runner.run_drive_consultation(agent_id, config=cfg)
                     record.result = "done"
                 except Exception as e:
                     record.result = f"error: {e}"
-                    get_logger("system").error("tick_error", f"Error in drives for {agent_id}: {e}", {"type": "drives", "agent": agent_id})
+                    get_logger("system").error(
+                        "tick_error", f"Error in drives for {agent_id}: {e}", {"type": "drives", "agent": agent_id}
+                    )
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -319,12 +337,16 @@ async def tick(*, config: Config | None = None) -> TickResult:
 
             record = DispatchRecord(type="dreams", agent=agent_id, at=now_iso)
             try:
-                get_logger("system").info("tick_dispatch", f"Dispatching dream cycle for {agent_id}", {"type": "dreams", "agent": agent_id})
+                get_logger("system").info(
+                    "tick_dispatch", f"Dispatching dream cycle for {agent_id}", {"type": "dreams", "agent": agent_id}
+                )
                 await runner.run_dream_cycle(agent_id, config=cfg)
                 record.result = "done"
             except Exception as e:
                 record.result = f"error: {e}"
-                get_logger("system").error("tick_error", f"Error in dream for {agent_id}: {e}", {"type": "dreams", "agent": agent_id})
+                get_logger("system").error(
+                    "tick_error", f"Error in dream for {agent_id}: {e}", {"type": "dreams", "agent": agent_id}
+                )
             finally:
                 lock.close()
             result.dispatched.append(record)

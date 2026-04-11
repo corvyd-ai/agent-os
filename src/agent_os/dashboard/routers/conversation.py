@@ -85,8 +85,10 @@ async def send_message(req: SendRequest):
     """Send a message to an agent and stream the response as SSE."""
     agent_id = _resolve_agent_id(req.agent_id)
     if not agent_id:
+
         async def error_stream():
             yield f"data: {json.dumps({'type': 'error', 'message': f'Unknown agent: {req.agent_id}'})}\n\n"
+
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
     # Load or create conversation
@@ -97,12 +99,14 @@ async def send_message(req: SendRequest):
         conv = _new_conversation(agent_id)
 
     # Build conversation JSON for the runner
-    runner_input = json.dumps({
-        "conversation_id": conv["id"],
-        "agent_id": agent_id,
-        "turns": conv["turns"],
-        "message": req.message,
-    })
+    runner_input = json.dumps(
+        {
+            "conversation_id": conv["id"],
+            "agent_id": agent_id,
+            "turns": conv["turns"],
+            "message": req.message,
+        }
+    )
 
     lock_path = f"/tmp/agent-os-cycle-{agent_id}.lock"
 
@@ -230,15 +234,17 @@ async def list_conversations():
                 if turn["role"] == "human":
                     preview = turn["content"][:100]
                     break
-            conversations.append({
-                "id": data["id"],
-                "agent_id": data["agent_id"],
-                "created": data["created"],
-                "updated": data.get("updated", data["created"]),
-                "preview": preview,
-                "turn_count": len(data.get("turns", [])),
-                "total_cost_usd": data.get("total_cost_usd", 0.0),
-            })
+            conversations.append(
+                {
+                    "id": data["id"],
+                    "agent_id": data["agent_id"],
+                    "created": data["created"],
+                    "updated": data.get("updated", data["created"]),
+                    "preview": preview,
+                    "turn_count": len(data.get("turns", [])),
+                    "total_cost_usd": data.get("total_cost_usd", 0.0),
+                }
+            )
         except (json.JSONDecodeError, KeyError):
             continue
     # Sort by updated time, most recent first
