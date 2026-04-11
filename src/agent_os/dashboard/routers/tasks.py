@@ -30,12 +30,14 @@ async def list_tasks(
             meta, body = parse_frontmatter(f)
             if agent and meta.get("assigned_to") != agent:
                 continue
-            tasks.append({
-                **meta,
-                "body": body,
-                "status": status_name,
-                "_file": f.name,
-            })
+            tasks.append(
+                {
+                    **meta,
+                    "body": body,
+                    "status": status_name,
+                    "_file": f.name,
+                }
+            )
 
     # Sort by ID descending (most recent first), limit results
     tasks.sort(key=lambda t: t.get("id", ""), reverse=True)

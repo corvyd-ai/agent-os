@@ -1,6 +1,5 @@
 """Agent API routes."""
 
-
 from fastapi import APIRouter, Query
 
 from ..config import (

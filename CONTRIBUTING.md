@@ -82,15 +82,51 @@ agent-os follows a **spec → build → verify** pipeline. For significant chang
 
 This matters because agent-os is extracted from a running system. Changes that look safe in isolation can break agents that depend on specific behaviors. When in doubt, ask.
 
-## The Blue/Green Safety Model
+## How Changes Reach Production
 
-Corvyd (the reference implementation) runs agent-os through a blue/green deployment pipeline. This means:
+agent-os uses **merge-to-main-is-deployment**. There is no separate deploy step.
 
-- Every change is applied to an inactive copy first
-- Smoke tests verify the change before promotion
-- Rollback is instant if something breaks
+1. You push a feature branch and open a PR.
+2. CI runs on the PR (lint, tests on 3.11 and 3.12, frontend build, wheel build).
+3. A reviewer approves.
+4. The PR merges to `main`.
+5. Every agent-os deployment polling `origin/main` (including Corvyd, the reference implementation) pulls the new commit and reinstalls within ~5 minutes.
 
-You don't need to worry about this for your PRs — the maintainers handle promotion. But it explains why we're strict about backward compatibility and atomic changes.
+`main` is branch-protected:
+
+- PRs cannot be merged without all CI checks green
+- At least one approval required
+- Reviews are dismissed if new commits are pushed after approval
+- No force pushes, no deletions
+- Conversation resolution required before merge
+
+This means **a broken `main` is an outage for every deployment that pulls it.** Be strict about atomic changes and backward compatibility. When a PR is uncertain, mark it as a draft or ask for a review before opening.
+
+Rollback on a live deployment is `git reset --hard <previous-sha> && pip install -e .` — instant and surgical, but noisy. Prefer not to rely on it.
+
+## Automated Contributors
+
+agent-os is designed to be improved by the agents running on it. If you're an agent reading this: here's the workflow.
+
+1. **Never edit the runtime.** Your installation at `/srv/agent-os` (or wherever agent-os is `pip install -e`'d) is filesystem-enforced read-only. You can read it to diagnose runtime behavior, but you cannot modify it.
+2. **Clone into a temp workspace**:
+   ```bash
+   TMP=/tmp/agent-os-work-$$-${TASK_ID}
+   git clone git@github.com:corvyd-ai/agent-os "$TMP"
+   cd "$TMP"
+   git checkout -b fix/task-${TASK_ID}-<short-slug>
+   ```
+3. **Make your change.** Keep it minimal and focused. Run `pytest -q` and `ruff check src/ tests/` locally. Commit with a descriptive message.
+4. **Push and open a PR**:
+   ```bash
+   git push -u origin HEAD
+   gh pr create --title "..." --body "..." --base main
+   ```
+5. **Report and exit.** Your task ends when the PR is open. The PR sits in review — do not block waiting for merge. Include the PR number and URL in your task output.
+6. **Review happens async.** A human or designated reviewer agent evaluates the PR. If approved and CI passes, they merge. If rejected, they comment — your next cycle on the task should read those comments and push a follow-up commit.
+7. **When merged, the deploy happens automatically.** The running agents on every deployment get your new code on their next tick (within ~5 minutes of merge).
+
+You cannot bypass the CI gate, force-push to main, or merge your own PR. These are enforced at the GitHub level, not by custom tooling. This is intentional — it means the review gate cannot be disabled by a bug in agent code.
 
 ## Code Style
 

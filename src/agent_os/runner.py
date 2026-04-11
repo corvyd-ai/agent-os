@@ -854,7 +854,11 @@ async def run_thread_response(agent_id: str, pending_threads: list, *, config: C
     agent_key = agent_config.agent_id
 
     log = get_logger(agent_key)
-    log.info("thread_response_start", f"Responding to {len(pending_threads)} thread(s)", {"thread_count": len(pending_threads)})
+    log.info(
+        "thread_response_start",
+        f"Responding to {len(pending_threads)} thread(s)",
+        {"thread_count": len(pending_threads)},
+    )
 
     thread_lines = []
     for meta, _body, path in pending_threads:
@@ -1110,7 +1114,11 @@ async def run_standing_orders(
             )
         except RuntimeError as e:
             error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text, order=order_name)
-            log.error("standing_order_error", f"Error in standing order '{order_name}': {e}", {**error_refs, "order": order_name})
+            log.error(
+                "standing_order_error",
+                f"Error in standing order '{order_name}': {e}",
+                {**error_refs, "order": order_name},
+            )
             # Mark cadence even on error to prevent infinite retry loops.
             # The order will be retried after the normal cadence interval.
             aios.mark_cadence(agent_key, order_name, config=cfg)

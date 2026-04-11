@@ -63,14 +63,16 @@ async def overview():
                 current_task = {"id": meta.get("id"), "title": meta.get("title")}
                 break
 
-        agents.append({
-            "id": agent_id,
-            "name": _short_name(agent_id),
-            "last_active": last_active,
-            "cost_today": round(cost_today, 4),
-            "cycles_today": cycles,
-            "current_task": current_task,
-        })
+        agents.append(
+            {
+                "id": agent_id,
+                "name": _short_name(agent_id),
+                "last_active": last_active,
+                "cost_today": round(cost_today, 4),
+                "cycles_today": cycles,
+                "current_task": current_task,
+            }
+        )
 
     # --- Task queue summary ---
     task_counts = {}
@@ -89,11 +91,13 @@ async def overview():
         by_agent: dict[str, float] = defaultdict(float)
         for e in entries:
             by_agent[_normalize_agent(e.get("agent", ""))] += e.get("cost_usd", 0)
-        cost_trend.append({
-            "date": str(date),
-            "total": round(day_total, 4),
-            "by_agent": {k: round(v, 4) for k, v in by_agent.items()},
-        })
+        cost_trend.append(
+            {
+                "date": str(date),
+                "total": round(day_total, 4),
+                "by_agent": {k: round(v, 4) for k, v in by_agent.items()},
+            }
+        )
     cost_trend.reverse()
 
     # --- Drives ---
@@ -107,13 +111,15 @@ async def overview():
         for f in sorted(TASKS_QUEUED.glob("*.md")):
             meta, _body = parse_frontmatter(f)
             if meta.get("assigned_to") == "human":
-                human_tasks.append({
-                    "id": meta.get("id"),
-                    "title": meta.get("title"),
-                    "priority": meta.get("priority", "medium"),
-                    "created_by": meta.get("created_by", ""),
-                    "created": meta.get("created", ""),
-                })
+                human_tasks.append(
+                    {
+                        "id": meta.get("id"),
+                        "title": meta.get("title"),
+                        "priority": meta.get("priority", "medium"),
+                        "created_by": meta.get("created_by", ""),
+                        "created": meta.get("created", ""),
+                    }
+                )
 
     # --- Recent activity (merged timeline, always hide idle) ---
     activity = []
