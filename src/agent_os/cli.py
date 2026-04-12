@@ -4,6 +4,7 @@ Provides subcommands for initializing, running, and managing agent companies.
 
 Usage:
     agent-os init my-company          # Create a new company filesystem
+    agent-os status                   # Show compact system status overview
     agent-os cycle agent-001          # Run one cycle (check tasks, messages, threads)
     agent-os run                      # Run all agents once (one cycle each)
     agent-os task agent-001 task-001  # Run a specific task
@@ -165,6 +166,20 @@ def _handle_agent_not_found(e: FileNotFoundError) -> None:
     print(f"Error: {e}", file=sys.stderr)
     print("\nHint: check available agents with: ls agents/registry/", file=sys.stderr)
     sys.exit(1)
+
+
+# --- status command ---
+
+
+def cmd_status(args):
+    """Show compact system status overview."""
+    _set_root(args)
+    from .status import format_status
+
+    no_color = getattr(args, "no_color", False)
+    output, exit_code = format_status(no_color=no_color)
+    print(output)
+    sys.exit(exit_code)
 
 
 # --- cycle command ---
@@ -607,6 +622,12 @@ def main():
     p_init = subparsers.add_parser("init", help="Create a new agent-os company")
     p_init.add_argument("name", help="Name for the company directory")
     p_init.set_defaults(func=cmd_init)
+
+    # status
+    p_status = subparsers.add_parser("status", help="Show compact system status overview")
+    p_status.add_argument("--no-color", action="store_true", help="Disable color output")
+    _add_common_args(p_status)
+    p_status.set_defaults(func=cmd_status)
 
     # cycle
     p_cycle = subparsers.add_parser("cycle", help="Run one cycle for an agent")
