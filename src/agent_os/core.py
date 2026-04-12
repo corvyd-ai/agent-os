@@ -754,28 +754,39 @@ def create_task(
     assigned_to: str | None = None,
     priority: str = "medium",
     *,
+    destination: str | None = None,
     config: Config | None = None,
 ) -> tuple[str, str]:
     """Create a task. Returns (task_id, destination).
 
+    When *destination* is provided ("backlog" or "queued"), the autonomy
+    check is skipped and the task is placed directly.  This is used by
+    the dashboard for human-created tasks.
+
+    Otherwise the autonomy level of *created_by* decides:
     low autonomy -> PermissionError
     medium -> backlog/
     high -> queued/
     """
     cfg = config or get_config()
-    level = get_autonomy_level(created_by, config=cfg)
-
-    if level == "low":
-        raise PermissionError(f"Agent {created_by} has 'low' autonomy and cannot create tasks")
 
     date_prefix = datetime.now(cfg.tz).strftime("task-%Y-%m%d")
 
-    if level == "medium":
-        dest_dir = cfg.tasks_backlog
-        destination = "backlog"
-    else:  # high
-        dest_dir = cfg.tasks_queued
-        destination = "queued"
+    if destination is not None:
+        if destination not in ("backlog", "queued"):
+            raise ValueError(f"Invalid destination: {destination!r}. Must be 'backlog' or 'queued'.")
+        dest_dir = cfg.tasks_backlog if destination == "backlog" else cfg.tasks_queued
+        level = "override"
+    else:
+        level = get_autonomy_level(created_by, config=cfg)
+        if level == "low":
+            raise PermissionError(f"Agent {created_by} has 'low' autonomy and cannot create tasks")
+        if level == "medium":
+            dest_dir = cfg.tasks_backlog
+            destination = "backlog"
+        else:  # high
+            dest_dir = cfg.tasks_queued
+            destination = "queued"
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     task_id = next_id(date_prefix, dest_dir, config=cfg)
