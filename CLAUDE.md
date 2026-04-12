@@ -1,8 +1,18 @@
 # agent-os — Claude Code Context
 
-agent-os is a file-based operating system for AI-native organizations. Everything is a file — tasks, decisions, messages, knowledge, agent state. The filesystem is the shared brain. Agents run on cron, check for work, act, and exit. No daemons, no databases — just files, git, and Unix.
+agent-os is a file-based operating system for AI-native organizations. Everything is a file — tasks, decisions, messages, knowledge, agent state. The filesystem is the shared brain. Agents run on schedules (cron or systemd timers), check for work, act, and exit. No daemons, no databases — just files, git, and Unix.
 
-## Quick Start
+**This CLAUDE.md is for working on agent-os itself — the platform.** You're here to fix a bug, add a feature, refactor, write tests, or improve docs in the Python source, dashboard, or examples. If you're instead trying to *observe or operate* a running company that uses agent-os, you want that company's own workspace — its `CLAUDE.md` lives alongside its company directory, not here.
+
+## Contributing
+
+`main` is branch-protected. Every change flows through a feature branch → PR → CI → review → merge. CI runs lint (`ruff check`, `ruff format --check`), the pytest suite on Python 3.11 and 3.12, a frontend build, and a wheel/sdist build. At least one approving review is required; force-pushes and direct pushes to `main` are blocked.
+
+The complete workflow — for both human contributors and agents running on agent-os who want to propose platform improvements — is documented in **`CONTRIBUTING.md`**. Read it before your first PR.
+
+How merged changes reach a *running* deployment is a deployment concern, not a platform concern. Typical patterns include pinning a specific commit/tag, installing from `main`, or running a polling updater that `pip install -e`'s `origin/main` on a timer. The platform itself just lives in this repo; how you ship it to production is up to you.
+
+## Quick Start (fresh clone)
 
 Clone the repo and run Claude Code:
 ```
