@@ -82,15 +82,15 @@ agent-os follows a **spec → build → verify** pipeline. For significant chang
 
 This matters because agent-os is extracted from a running system. Changes that look safe in isolation can break agents that depend on specific behaviors. When in doubt, ask.
 
-## How Changes Reach Production
+## Changes Reach Production Through `main`
 
-agent-os uses **merge-to-main-is-deployment**. There is no separate deploy step.
+`main` is the release branch. All changes flow through it, never around it.
 
 1. You push a feature branch and open a PR.
 2. CI runs on the PR (lint, tests on 3.11 and 3.12, frontend build, wheel build).
 3. A reviewer approves.
 4. The PR merges to `main`.
-5. Every agent-os deployment polling `origin/main` (including Corvyd, the reference implementation) pulls the new commit and reinstalls within ~5 minutes.
+5. How the merge reaches any given running deployment is a deployment-level choice — typical patterns include pinning a specific commit/tag, installing from `main` at deploy time, or running a polling updater that `pip install -e`'s `origin/main` on a timer. This project doesn't prescribe one.
 
 `main` is branch-protected:
 
@@ -100,15 +100,15 @@ agent-os uses **merge-to-main-is-deployment**. There is no separate deploy step.
 - No force pushes, no deletions
 - Conversation resolution required before merge
 
-This means **a broken `main` is an outage for every deployment that pulls it.** Be strict about atomic changes and backward compatibility. When a PR is uncertain, mark it as a draft or ask for a review before opening.
+Because some deployments track `main` directly, **a broken `main` can cause immediate outages downstream**. Be strict about atomic changes and backward compatibility. When a PR is uncertain, mark it as a draft or ask for review before opening.
 
-Rollback on a live deployment is `git reset --hard <previous-sha> && pip install -e .` — instant and surgical, but noisy. Prefer not to rely on it.
+Rollback on a deployment that tracks `main` is typically `git reset --hard <previous-sha> && pip install -e .` — instant and surgical, but noisy. Prefer not to rely on it.
 
 ## Automated Contributors
 
 agent-os is designed to be improved by the agents running on it. If you're an agent reading this: here's the workflow.
 
-1. **Never edit the runtime.** Your installation at `/srv/agent-os` (or wherever agent-os is `pip install -e`'d) is filesystem-enforced read-only. You can read it to diagnose runtime behavior, but you cannot modify it.
+1. **Never edit the installed runtime directly.** Wherever agent-os is `pip install -e`'d on the host you're running on — that's not where platform changes go. Convention (and in hardened deployments, filesystem permissions) forbids it. You can read the installed source to diagnose runtime behavior, but changes always flow through a fresh clone and a PR.
 2. **Clone into a temp workspace**:
    ```bash
    TMP=/tmp/agent-os-work-$$-${TASK_ID}
@@ -124,7 +124,7 @@ agent-os is designed to be improved by the agents running on it. If you're an ag
    ```
 5. **Report and exit.** Your task ends when the PR is open. The PR sits in review — do not block waiting for merge. Include the PR number and URL in your task output.
 6. **Review happens async.** A human or designated reviewer agent evaluates the PR. If approved and CI passes, they merge. If rejected, they comment — your next cycle on the task should read those comments and push a follow-up commit.
-7. **When merged, the deploy happens automatically.** The running agents on every deployment get your new code on their next tick (within ~5 minutes of merge).
+7. **When merged, how quickly it reaches you depends on the host.** If the deployment tracks `main` and re-installs on poll (a common pattern), your new code is live on the next tick, typically within minutes. Other deployments may pin and update manually. Either way, your task ends at "PR opened" — the rest happens asynchronously.
 
 You cannot bypass the CI gate, force-push to main, or merge your own PR. These are enforced at the GitHub level, not by custom tooling. This is intentional — it means the review gate cannot be disabled by a bug in agent code.
 
