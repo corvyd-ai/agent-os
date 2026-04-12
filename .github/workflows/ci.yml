@@ -108,3 +108,16 @@ jobs:
         run: |
           pip install "$(ls dist/*.whl)[dashboard]"
           agent-os --help
+
+      - name: Publish wheel to 'latest' release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          # Create or update the 'latest' release, overwriting the previous wheel
+          gh release delete latest --yes 2>/dev/null || true
+          gh release create latest "$WHEEL" \
+            --title "Latest build from main" \
+            --notes "Auto-published by CI on merge to main. Commit: ${{ github.sha }}" \
+            --prerelease
