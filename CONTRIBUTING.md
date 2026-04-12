@@ -69,7 +69,7 @@ src/agent_os/
   aios.py        # Core AIOS engine
   cli.py         # CLI entry point (agent-os command)
   errors.py      # Error classification interface
-  dashboard/     # FastAPI backend + React frontend
+  dashboard/     # FastAPI backend + React frontend + dev tools
 ```
 
 ## How We Build: Spec First

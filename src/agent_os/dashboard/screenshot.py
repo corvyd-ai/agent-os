@@ -70,7 +70,10 @@ def main(args: argparse.Namespace) -> None:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("Error: playwright not installed. Run: pip install playwright && playwright install chromium", file=sys.stderr)
+        print(
+            "Error: playwright not installed. Run: pip install playwright && playwright install chromium",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     output_dir = Path(__file__).parent / "screenshots"
@@ -97,7 +100,9 @@ def main(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         for route in routes:
-            filepath = capture(route, page=page, output_dir=output_dir, full_page=args.full_page, delay=args.delay, port=args.port)
+            filepath = capture(
+                route, page=page, output_dir=output_dir, full_page=args.full_page, delay=args.delay, port=args.port
+            )
             print(filepath)
 
         browser.close()

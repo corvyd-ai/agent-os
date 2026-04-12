@@ -55,11 +55,10 @@ src/agent_os/
   composer.py     # Prompt composition (4-layer attention model)
   core.py         # File operations (tasks, messages, broadcasts, IDs)
   prompts/        # Default Jinja2 templates (preamble, interactive, quality gates)
-  dashboard/      # Dashboard backend (FastAPI)
-dashboard/
-  frontend/       # Dashboard frontend (React/Vite)
-  Makefile         # Dev server commands
-  screenshot.py   # Visual testing tool
+  dashboard/      # Dashboard (FastAPI backend + React/Vite frontend)
+    frontend/     # React/Vite app (npm run build → dist/)
+    Makefile      # Dev server commands (make dev)
+    screenshot.py # Visual testing tool
 examples/
   mini-company/   # Reference implementation of a company filesystem
 tests/            # pytest suite

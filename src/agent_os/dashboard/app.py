@@ -7,7 +7,7 @@ the same FastAPI app serves it at / as static files, so a single
 Frontend asset lookup order:
 1. `<package>/_frontend/` — bundled into the wheel via hatchling force-include.
    This is the normal path for `pip install agent-os[dashboard]` users.
-2. `<repo>/dashboard/frontend/dist/` — repo-relative path for editable installs
+2. `<package>/frontend/dist/` — sibling directory for editable installs
    (`pip install -e .`) where someone has run `npm run build` locally.
 
 If neither exists, the app still works as an API-only service (the usual dev
@@ -66,9 +66,8 @@ def _find_frontend_dist() -> pathlib.Path | None:
     if bundled.is_dir():
         return bundled
 
-    # 2. Editable install: repo-relative <repo>/dashboard/frontend/dist/
-    #    here = .../src/agent_os/dashboard, so repo = here.parent.parent.parent
-    editable = here.parent.parent.parent / "dashboard" / "frontend" / "dist"
+    # 2. Editable install: frontend/dist/ is a sibling directory
+    editable = here / "frontend" / "dist"
     if editable.is_dir():
         return editable
 
