@@ -21,12 +21,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from agent_os import __version__
+
 from .routers import agents, controls, conversation, costs, feedback, health, messages, notes, overview, strategy, tasks
 
 app = FastAPI(
     title="agent-os Dashboard",
     description="Observability dashboard for the agent-os platform",
-    version="0.1.0",
+    version=__version__,
 )
 
 # CORS for the Vite dev server (local development only — in production the
@@ -55,6 +57,11 @@ app.include_router(controls.router)  # schedule, budget, autonomy, backlog contr
 @app.get("/api/ping")
 async def ping():
     return {"status": "ok"}
+
+
+@app.get("/api/info")
+async def info():
+    return {"version": __version__}
 
 
 def _find_frontend_dist() -> pathlib.Path | None:

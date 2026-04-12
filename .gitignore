@@ -9,6 +9,9 @@ dist/
 build/
 .eggs/
 
+# hatch-vcs generated version file
+src/agent_os/_version.py
+
 # Virtual environments
 .venv/
 venv/

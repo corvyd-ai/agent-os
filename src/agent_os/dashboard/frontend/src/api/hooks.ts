@@ -8,6 +8,20 @@ async function fetchJson<T>(url: string): Promise<T> {
   return res.json()
 }
 
+// --- App Info ---
+
+export interface AppInfo {
+  version: string
+}
+
+export function useAppInfo() {
+  return useQuery<AppInfo>({
+    queryKey: ['app-info'],
+    queryFn: () => fetchJson('/api/info'),
+    staleTime: Infinity,
+  })
+}
+
 // --- Types ---
 
 export interface AgentSummary {
