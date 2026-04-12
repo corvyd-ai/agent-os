@@ -1,8 +1,8 @@
-"""Dashboard controls API — schedule, budget, autonomy, and backlog management.
+"""Dashboard controls API — schedule, budget, autonomy, backlog, and task management.
 
 These routes provide interactive controls for the dashboard, allowing the
 operator to adjust budget caps, toggle schedules, manage autonomy levels,
-and handle the task backlog.
+handle the task backlog, decline queued tasks, and create new tasks.
 """
 
 import json
@@ -326,3 +326,50 @@ async def reject_backlog(task_id: str, body: BacklogAction):
     if result:
         return {"status": "ok", "task_id": task_id, "reason": reason, "destination": str(result)}
     raise HTTPException(status_code=404, detail=f"Task {task_id} not found in backlog")
+
+
+# ---- Queued task management ----
+
+
+@router.post("/queued/{task_id}/decline")
+async def decline_queued(task_id: str, body: BacklogAction):
+    """Decline a queued task with reason."""
+    reason = body.reason or "No reason given"
+    from agent_os.core import decline_task
+
+    result = decline_task(task_id, reason)
+    if result:
+        return {"status": "ok", "task_id": task_id, "reason": reason, "destination": str(result)}
+    raise HTTPException(status_code=404, detail=f"Task {task_id} not found in queued")
+
+
+# ---- Task creation ----
+
+
+class TaskCreateRequest(BaseModel):
+    title: str
+    body: str
+    assigned_to: str | None = None
+    priority: str = "medium"
+    destination: str = "backlog"
+
+
+@router.post("/tasks/create")
+async def create_task_endpoint(req: TaskCreateRequest):
+    """Create a new task from the dashboard."""
+    from agent_os.core import create_task
+
+    if req.priority not in ("low", "medium", "high", "critical"):
+        raise HTTPException(status_code=400, detail=f"Invalid priority: {req.priority}")
+    if req.destination not in ("backlog", "queued"):
+        raise HTTPException(status_code=400, detail=f"Invalid destination: {req.destination}")
+
+    task_id, destination = create_task(
+        created_by="human",
+        title=req.title,
+        body=req.body,
+        assigned_to=req.assigned_to,
+        priority=req.priority,
+        destination=req.destination,
+    )
+    return {"status": "ok", "task_id": task_id, "destination": destination}
