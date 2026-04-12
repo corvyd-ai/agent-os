@@ -79,17 +79,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: Build frontend for wheel bundling
+        working-directory: dashboard/frontend
+        run: |
+          npm ci
+          npm run build
+
       - name: Install build tools
         run: pip install build
 
-      - name: Build wheel and sdist
-        run: python -m build
+      - name: Build wheel (direct from source, not via sdist)
+        run: python -m build --wheel
 
-      - name: Verify wheel
+      - name: Verify wheel contains bundled frontend
         run: |
-          pip install dist/*.whl
+          unzip -l dist/*.whl | grep -q 'agent_os/dashboard/_frontend/index.html' || { echo 'ERROR: wheel does not contain bundled frontend'; exit 1; }
+          echo 'wheel contains bundled frontend'
+
+      - name: Verify wheel installs and CLI works
+        run: |
+          pip install "$(ls dist/*.whl)[dashboard]"
           agent-os --help
