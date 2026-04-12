@@ -101,6 +101,7 @@ EOF
 ### 5. Run your agent
 
 ```bash
+export ANTHROPIC_API_KEY=your-key-here
 agent-os cycle agent-001-builder
 ```
 
@@ -115,10 +116,12 @@ cat scripts/hello.py     # the agent's output
 
 ```bash
 agent-os dashboard
-# Open http://localhost:8000
+# Open http://localhost:8787
 ```
 
 See your agents, tasks, costs, and health metrics in real time.
+
+> **Tip:** Using [Claude Code](https://claude.com/claude-code)? Run `/setup` for a guided interactive experience that handles installation, configuration, and first agent creation.
 
 ---
 
@@ -257,8 +260,7 @@ config = Config(
     company_root=Path("./my-company"),
     default_model="claude-sonnet-4-6",
     max_budget_per_invocation_usd=5.00,
-    dashboard_title="My Agent Company",
-    dashboard_enable_conversation=True,
+    dashboard_agent_ids=["agent-001-builder"],
 )
 
 configure(config)
@@ -320,7 +322,7 @@ agent-os is in active development. It powers [Corvyd](https://corvyd.ai) in prod
 - **Runtime** — Stable. Task lifecycle, messaging, governance, cost control all production-tested.
 - **Dashboard** — Stable. 10 pages covering agents, tasks, costs, strategy, health.
 - **Health Metrics** — In development. Core metrics computed, composite scoring coming.
-- **Setup Skill** — In development. Interactive `/setup` experience for Claude Code.
+- **Setup Skill** — Interactive `/setup` experience for Claude Code. Run `claude` in the repo, then type `/setup`.
 
 ---
 

@@ -32,18 +32,30 @@ my-company/
 │   ├── tasks/
 │   │   ├── queued/        # Work waiting to be claimed
 │   │   ├── in-progress/   # Work being done
+│   │   ├── in-review/     # Work awaiting review
 │   │   ├── done/          # Completed work
-│   │   └── failed/        # Failed work
+│   │   ├── failed/        # Failed work
+│   │   ├── declined/      # Declined work
+│   │   └── backlog/       # Future work (needs promotion)
 │   ├── messages/
 │   │   ├── broadcast/     # Company-wide announcements
 │   │   └── threads/       # Agent conversations
 │   └── logs/              # Activity logs
 ├── strategy/
 │   ├── drives.md          # Persistent goals
-│   └── decisions/         # Decision records
-└── identity/
-    ├── values.md          # What the company believes
-    └── principles.md      # How it operates
+│   ├── decisions/         # Decision records
+│   └── proposals/
+│       ├── active/        # Open proposals
+│       └── decided/       # Resolved proposals
+├── identity/
+│   ├── values.md          # What the company believes
+│   └── principles.md      # How it operates
+├── finance/
+│   └── costs/             # Cost tracking
+├── products/              # Product artifacts
+├── knowledge/             # Shared knowledge base
+└── operations/
+    └── scripts/           # Operational scripts
 ```
 
 ## Define Your First Agent
@@ -104,7 +116,7 @@ cat scripts/hello.py     # the agent's output
 
 ```bash
 agent-os dashboard
-# Open http://localhost:8000
+# Open http://localhost:8787
 ```
 
 The dashboard shows your agents, tasks, costs, and health metrics in real time.

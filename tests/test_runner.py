@@ -15,6 +15,7 @@ from agent_os.registry import AgentConfig
 from agent_os.runner import (
     _classify_idle_cycle,
     _compute_expected_at,
+    _ensure_api_key,
     _find_product_code_dir,
     _streaming_prompt,
 )
@@ -359,3 +360,19 @@ def test_compute_expected_at_with_cadence(aios_config):
     result = _compute_expected_at("agent-001-maker", "health-scan", 12.0, config=aios_config)
     expected = last_run + timedelta(hours=12)
     assert result == expected.isoformat()
+
+
+# ── Pre-flight: API key validation ──────────────────────────────────
+
+
+def test_ensure_api_key_raises_when_missing(monkeypatch):
+    """_ensure_api_key should raise RuntimeError when ANTHROPIC_API_KEY is not set."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="No ANTHROPIC_API_KEY"):
+        _ensure_api_key()
+
+
+def test_ensure_api_key_passes_when_set(monkeypatch):
+    """_ensure_api_key should not raise when ANTHROPIC_API_KEY is set."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+    _ensure_api_key()  # should not raise

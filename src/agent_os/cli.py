@@ -32,6 +32,7 @@ INIT_DIRS = [
     "agents/tasks/in-review",
     "agents/tasks/done",
     "agents/tasks/failed",
+    "agents/tasks/declined",
     "agents/tasks/backlog",
     "agents/messages/broadcast",
     "agents/messages/threads",
@@ -90,44 +91,80 @@ def cmd_init(args):
         "Agents read this to understand context.\n"
     )
 
-    print(f"""
+    (target / "agent-os.toml").write_text(
+        f"# agent-os configuration for {name}\n"
+        f"# Full reference: https://github.com/corvyd-ai/agent-os/blob/main/docs/configuration.md\n"
+        f"\n"
+        f"[company]\n"
+        f'name = "{name}"\n'
+        f'root = "."\n'
+        f"\n"
+        f"[runtime]\n"
+        f'model = "claude-sonnet-4-6"\n'
+        f"\n"
+        f"[budget]\n"
+        f"task = 5.00\n"
+        f"daily_cap = 50.00\n"
+        f"weekly_cap = 250.00\n"
+        f"monthly_cap = 750.00\n"
+    )
+
+    print(f"""\
 Done! Your company is ready at {target}/
 
 Next steps:
-  cd {name}
 
-  # Define your first agent:
+  1. cd {name}
+
+  2. Define your first agent:
+
   cat > agents/registry/agent-001-builder.md << 'EOF'
-  ---
-  id: agent-001-builder
-  name: The Builder
-  role: Software Engineer
-  model: claude-sonnet-4-6
-  ---
+---
+id: agent-001-builder
+name: The Builder
+role: Software Engineer
+model: claude-sonnet-4-6
+---
 
-  I build software. I care about clean code, working tests, and shipping.
-  EOF
+I build software. I care about clean code, working tests, and shipping.
+EOF
 
-  # Create a task:
+  3. Create a task:
+
   cat > agents/tasks/queued/task-001.md << 'EOF'
-  ---
-  id: task-001
-  title: Write a hello world script
-  assigned_to: agent-001-builder
-  priority: medium
-  ---
+---
+id: task-001
+title: Write a hello world script
+assigned_to: agent-001-builder
+priority: medium
+---
 
-  Write a Python script that prints "Hello from agent-os."
-  Write it to scripts/hello.py.
-  EOF
+Write a Python script that prints "Hello from agent-os."
+Write it to scripts/hello.py.
+EOF
 
-  # Run your agent:
+  4. Set your API key:
+
   export ANTHROPIC_API_KEY=your-key-here
+
+  5. Run your agent:
+
   agent-os cycle agent-001-builder
 
-  # Set up automatic scheduling:
+  6. Set up automatic scheduling:
+
   agent-os cron install
 """)
+
+
+# --- helpers ---
+
+
+def _handle_agent_not_found(e: FileNotFoundError) -> None:
+    """Print a friendly error when an agent registry file is not found."""
+    print(f"Error: {e}", file=sys.stderr)
+    print("\nHint: check available agents with: ls agents/registry/", file=sys.stderr)
+    sys.exit(1)
 
 
 # --- cycle command ---
@@ -138,13 +175,19 @@ def cmd_cycle(args):
     _set_root(args)
     from .runner import run_cycle
 
-    asyncio.run(
-        run_cycle(
-            args.agent,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget,
+    try:
+        asyncio.run(
+            run_cycle(
+                args.agent,
+                max_turns=args.max_turns,
+                max_budget_usd=args.max_budget,
+            )
         )
-    )
+    except FileNotFoundError as e:
+        _handle_agent_not_found(e)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 # --- run command ---
@@ -184,14 +227,20 @@ def cmd_task(args):
     _set_root(args)
     from .runner import run_agent
 
-    asyncio.run(
-        run_agent(
-            args.agent,
-            task_id=args.task_id,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget,
+    try:
+        asyncio.run(
+            run_agent(
+                args.agent,
+                task_id=args.task_id,
+                max_turns=args.max_turns,
+                max_budget_usd=args.max_budget,
+            )
         )
-    )
+    except FileNotFoundError as e:
+        _handle_agent_not_found(e)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 # --- standing-orders command ---
@@ -202,13 +251,19 @@ def cmd_standing_orders(args):
     _set_root(args)
     from .runner import run_standing_orders
 
-    asyncio.run(
-        run_standing_orders(
-            args.agent,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget,
+    try:
+        asyncio.run(
+            run_standing_orders(
+                args.agent,
+                max_turns=args.max_turns,
+                max_budget_usd=args.max_budget,
+            )
         )
-    )
+    except FileNotFoundError as e:
+        _handle_agent_not_found(e)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 # --- drives command ---
@@ -219,13 +274,19 @@ def cmd_drives(args):
     _set_root(args)
     from .runner import run_drive_consultation
 
-    asyncio.run(
-        run_drive_consultation(
-            args.agent,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget,
+    try:
+        asyncio.run(
+            run_drive_consultation(
+                args.agent,
+                max_turns=args.max_turns,
+                max_budget_usd=args.max_budget,
+            )
         )
-    )
+    except FileNotFoundError as e:
+        _handle_agent_not_found(e)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 # --- dream command ---
@@ -236,13 +297,19 @@ def cmd_dream(args):
     _set_root(args)
     from .runner import run_dream_cycle
 
-    asyncio.run(
-        run_dream_cycle(
-            args.agent,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget,
+    try:
+        asyncio.run(
+            run_dream_cycle(
+                args.agent,
+                max_turns=args.max_turns,
+                max_budget_usd=args.max_budget,
+            )
         )
-    )
+    except FileNotFoundError as e:
+        _handle_agent_not_found(e)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 # --- tick command ---
