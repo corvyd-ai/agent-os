@@ -288,7 +288,7 @@ node --version  # need 20+
 
 Install frontend:
 ```bash
-cd <agent-os-repo>/dashboard/frontend && npm install
+cd <agent-os-repo>/src/agent_os/dashboard/frontend && npm install
 ```
 
 Test:

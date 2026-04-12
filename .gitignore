@@ -35,8 +35,8 @@ Thumbs.db
 # Node (dashboard frontend)
 node_modules/
 .next/
-dashboard/frontend/dist/
-dashboard/screenshots/
+src/agent_os/dashboard/frontend/dist/
+src/agent_os/dashboard/screenshots/
 
 # Environment
 .env

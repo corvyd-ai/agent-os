@@ -1,6 +1,6 @@
 """Custom hatchling build hook for agent-os.
 
-Conditionally bundles the built dashboard frontend (dashboard/frontend/dist/)
+Conditionally bundles the built dashboard frontend (src/agent_os/dashboard/frontend/dist/)
 into the wheel at agent_os/dashboard/_frontend/ — but only when the dist
 directory actually exists. This lets `pip install -e .` succeed without
 requiring Node.js to be present at install time, while still producing a
@@ -18,7 +18,7 @@ class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict) -> None:
-        dist = Path(self.root) / "dashboard" / "frontend" / "dist"
+        dist = Path(self.root) / "src" / "agent_os" / "dashboard" / "frontend" / "dist"
         if not dist.is_dir():
             # No built frontend — produce an API-only wheel. Dev/test installs
             # hit this path. Production wheel builds in CI build the frontend
