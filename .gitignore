@@ -55,3 +55,9 @@ secrets/
 # Distribution
 *.tar.gz
 *.whl
+
+# Runtime data (produced by agent-os runs)
+agents/
+
+# Claude Code
+.claude/scheduled_tasks.lock

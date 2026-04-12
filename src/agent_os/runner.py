@@ -439,6 +439,10 @@ async def run_agent(
         {"model": agent_config.model, "tools": agent_config.allowed_tools},
     )
 
+    # Pre-flight: validate API key before claiming any task
+    os.environ.pop("CLAUDECODE", None)
+    _ensure_api_key()
+
     task_context = None
     task_meta = None
 
@@ -449,52 +453,54 @@ async def run_agent(
             sys.exit(1)
         log.info("claimed_task", f"Claimed task: {task_path.name}", {"task_id": task_id})
 
-        task_meta, task_body = aios._parse_frontmatter(task_path)
-        task_context = task_path.read_text()
-        prompt = build_task_prompt(agent_config, task_meta, task_body)
+        try:
+            task_meta, task_body = aios._parse_frontmatter(task_path)
+            task_context = task_path.read_text()
+            prompt = build_task_prompt(agent_config, task_meta, task_body)
 
-        aios.log_action(
-            agent_config.agent_id,
-            "claimed_task",
-            f"Claimed {task_id}",
-            {"task_id": task_id, "path": str(task_path)},
-            config=cfg,
-        )
+            aios.log_action(
+                agent_config.agent_id,
+                "claimed_task",
+                f"Claimed {task_id}",
+                {"task_id": task_id, "path": str(task_path)},
+                config=cfg,
+            )
+
+            system_prompt = composer.build_system_prompt(agent_config, task_context)
+
+            log.info("sdk_invoke", "Invoking Claude Agent SDK", {"model": agent_config.model, "task": task_id})
+
+            stderr_capture = StderrCapture(agent_id)
+            options = _make_options(
+                agent_config,
+                system_prompt,
+                config=cfg,
+                max_turns=max_turns,
+                max_budget_usd=max_budget_usd,
+                stderr_capture=stderr_capture,
+            )
+
+            result_msg = await _run_query(
+                prompt,
+                options,
+                label=f"task {task_id}",
+                stderr_capture=stderr_capture,
+                max_retries=2,
+            )
+        except RuntimeError as e:
+            error_detail = str(e)
+            stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+            error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_text, task=task_id)
+            log.error("sdk_error", error_detail, {**error_refs, "task": task_id})
+            aios.fail_task(task_id, error_detail, error_refs=error_refs, config=cfg)
+            sys.exit(1)
+        except Exception as e:
+            error_detail = f"Pre-flight error: {e}"
+            log.error("preflight_error", error_detail, {"task": task_id})
+            aios.fail_task(task_id, error_detail, config=cfg)
+            sys.exit(1)
     else:
         log.error("no_mode", "Must specify --task or --cycle")
-        sys.exit(1)
-
-    system_prompt = composer.build_system_prompt(agent_config, task_context)
-
-    os.environ.pop("CLAUDECODE", None)
-    _ensure_api_key()
-
-    log.info("sdk_invoke", "Invoking Claude Agent SDK", {"model": agent_config.model, "task": task_id})
-
-    stderr_capture = StderrCapture(agent_id)
-    options = _make_options(
-        agent_config,
-        system_prompt,
-        config=cfg,
-        max_turns=max_turns,
-        max_budget_usd=max_budget_usd,
-        stderr_capture=stderr_capture,
-    )
-
-    try:
-        result_msg = await _run_query(
-            prompt,
-            options,
-            label=f"task {task_id}",
-            stderr_capture=stderr_capture,
-            max_retries=2,
-        )
-    except RuntimeError as e:
-        error_detail = str(e)
-        error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text, task=task_id)
-        log.error("sdk_error", error_detail, {**error_refs, "task": task_id})
-        if task_id:
-            aios.fail_task(task_id, error_detail, error_refs=error_refs, config=cfg)
         sys.exit(1)
 
     if result_msg:
