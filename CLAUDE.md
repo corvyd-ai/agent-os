@@ -45,6 +45,46 @@ pyright src/
 python -m build
 ```
 
+## Versioning
+
+The package version is derived from **git tags** via `hatch-vcs` (a setuptools-scm wrapper). There are no hardcoded version strings to maintain.
+
+### How it works
+
+- `hatch-vcs` runs `git describe` at build/install time and computes a PEP 440 version.
+- On a tagged commit (`git tag v1.2.0`), the version is exactly `1.2.0`.
+- Between tags, the version is a dev version like `1.2.0.dev5+gabcdef0` (5 commits after v1.2.0, at commit abcdef0).
+- At build time, `hatch-vcs` writes `src/agent_os/_version.py` — this file is `.gitignore`d and must never be committed.
+- `src/agent_os/__init__.py` imports `__version__` from `_version.py`, falling back to `importlib.metadata` for editable installs.
+
+### When to tag a release
+
+Tag `main` after merging a meaningful set of changes. Use semantic versioning (`vMAJOR.MINOR.PATCH`):
+- **PATCH** (`v0.1.1`) — bug fixes, docs, minor tweaks
+- **MINOR** (`v0.2.0`) — new features, new CLI commands, new API endpoints
+- **MAJOR** (`v1.0.0`) — breaking changes to the CLI, config schema, or file formats
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+### What NOT to do
+
+- **Never hardcode a version string** in source files, pyproject.toml, or the dashboard. The version flows from git tags → `_version.py` → `__version__` → everywhere else (CLI `--version`, FastAPI metadata, dashboard `/api/info`).
+- **Never commit `_version.py`** — it's generated and gitignored.
+- **Don't tag feature branches** — only tag commits on `main`.
+
+### Where the version surfaces
+
+| Location | How |
+|----------|-----|
+| `python -c "from agent_os import __version__; print(__version__)"` | Package import |
+| `agent-os --version` | CLI |
+| Dashboard sidebar footer | Frontend fetches `/api/info` |
+| `GET /api/info` | FastAPI endpoint |
+| `pip show agent-os` | Package metadata |
+
 ## Source Layout
 
 ```

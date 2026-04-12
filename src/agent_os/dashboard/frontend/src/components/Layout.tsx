@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import { useAppInfo } from '../api/hooks'
 
 interface NavItem {
   to: string
@@ -44,6 +45,7 @@ const NAV_SECTIONS: NavSection[] = [
 ]
 
 export default function Layout() {
+  const { data: appInfo } = useAppInfo()
   return (
     <div className="flex h-screen">
       {/* Sidebar */}
@@ -81,7 +83,7 @@ export default function Layout() {
           ))}
         </div>
         <div className="p-3 border-t border-[#334155] text-[10px] text-[#475569]">
-          agent-os
+          agent-os{appInfo?.version ? ` v${appInfo.version}` : ''}
         </div>
       </nav>
 

@@ -650,12 +650,9 @@ def main():
 
 
 def _get_version():
-    try:
-        from . import __version__
+    from . import __version__
 
-        return __version__
-    except ImportError:
-        return "0.1.0"
+    return __version__
 
 
 if __name__ == "__main__":
