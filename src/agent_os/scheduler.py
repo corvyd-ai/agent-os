@@ -25,6 +25,18 @@ from .config import Config, get_config
 from .logger import get_logger
 from .registry import list_agents
 
+# Schedule types gated by operating_hours.
+# These represent "agent on the clock" work that costs API budget.
+# Everything else (dreams, archive, log_archive, manifest, watchdog)
+# runs regardless of operating hours.
+_OPERATING_HOURS_GATED: frozenset[str] = frozenset(
+    {
+        "cycle",
+        "standing_orders",
+        "drives",
+    }
+)
+
 
 @dataclass
 class DispatchRecord:
@@ -183,13 +195,15 @@ async def tick(*, config: Config | None = None) -> TickResult:
     """Main entry point. Called every minute by a single cron entry.
 
     1. Check master enable switch
-    2. Check operating hours
+    2. Compute operating hours (applied selectively, not as a global gate)
     3. Check daily budget
-    4. For each schedule type (cycles, standing_orders, drives, dreams, maintenance):
-       - Check if any agent is due (cadence tracking)
-       - Acquire file lock (prevent overlap)
-       - Dispatch
+    4. For each schedule type:
+       - If type is in _OPERATING_HOURS_GATED and outside hours → skip
+       - Otherwise check if due, acquire lock, dispatch
     5. Write scheduler state file for dashboard
+
+    Operating hours only gate agent work (cycles, standing_orders, drives).
+    Dreams, archive, manifest, and watchdog run regardless of hours.
     """
     cfg = config or get_config()
     now_iso = _now(config=cfg).isoformat()
@@ -202,12 +216,10 @@ async def tick(*, config: Config | None = None) -> TickResult:
         write_scheduler_state(result, config=cfg)
         return result
 
-    # 2. Operating hours
-    if not is_within_operating_hours(config=cfg):
+    # 2. Operating hours — computed once, applied per dispatch type
+    outside_hours = not is_within_operating_hours(config=cfg)
+    if outside_hours:
         result.outside_hours = True
-        result.skipped.append("outside operating hours")
-        write_scheduler_state(result, config=cfg)
-        return result
 
     # 3. Budget
     budget = check_budget(config=cfg)
@@ -236,7 +248,9 @@ async def tick(*, config: Config | None = None) -> TickResult:
     from . import runner
 
     # --- Cycles ---
-    if cfg.schedule_cycles_enabled:
+    if outside_hours and "cycle" in _OPERATING_HOURS_GATED:
+        result.skipped.append("cycles: outside operating hours")
+    elif cfg.schedule_cycles_enabled:
         for agent_id in cycle_agents:
             cadence_name = "scheduler-cycle"
             if _is_cadence_due(agent_id, cadence_name, cfg.schedule_cycles_interval_minutes, config=cfg):
@@ -263,7 +277,9 @@ async def tick(*, config: Config | None = None) -> TickResult:
                 result.dispatched.append(record)
 
     # --- Standing orders ---
-    if cfg.schedule_standing_orders_enabled:
+    if outside_hours and "standing_orders" in _OPERATING_HOURS_GATED:
+        result.skipped.append("standing_orders: outside operating hours")
+    elif cfg.schedule_standing_orders_enabled:
         for agent_id in agent_ids:
             cadence_name = "scheduler-standing-orders"
             if _is_cadence_due(agent_id, cadence_name, cfg.schedule_standing_orders_interval_minutes, config=cfg):
@@ -294,7 +310,9 @@ async def tick(*, config: Config | None = None) -> TickResult:
                 result.dispatched.append(record)
 
     # --- Drive consultations ---
-    if cfg.schedule_drives_enabled:
+    if outside_hours and "drives" in _OPERATING_HOURS_GATED:
+        result.skipped.append("drives: outside operating hours")
+    elif cfg.schedule_drives_enabled:
         times = cfg.schedule_drives_weekend_times if _is_weekend(config=cfg) else cfg.schedule_drives_weekday_times
         if any(_is_time_match(t, config=cfg) for t in times):
             for agent_id in agent_ids:
@@ -424,16 +442,16 @@ def get_schedule_status(*, config: Config | None = None) -> str:
     lines.append(f"Within hours: {is_within_operating_hours(config=cfg)}")
     lines.append("")
 
-    lines.append("Schedule Types")
+    lines.append("Schedule Types  (* = respects operating hours)")
     lines.append("-" * 50)
     lines.append(
-        f"  Cycles:          {'ON' if cfg.schedule_cycles_enabled else 'OFF'} (every {cfg.schedule_cycles_interval_minutes}m)"
+        f" *Cycles:          {'ON' if cfg.schedule_cycles_enabled else 'OFF'} (every {cfg.schedule_cycles_interval_minutes}m)"
     )
     lines.append(
-        f"  Standing orders: {'ON' if cfg.schedule_standing_orders_enabled else 'OFF'} (every {cfg.schedule_standing_orders_interval_minutes}m)"
+        f" *Standing orders: {'ON' if cfg.schedule_standing_orders_enabled else 'OFF'} (every {cfg.schedule_standing_orders_interval_minutes}m)"
     )
     lines.append(
-        f"  Drives:          {'ON' if cfg.schedule_drives_enabled else 'OFF'} (weekday: {', '.join(cfg.schedule_drives_weekday_times)}, weekend: {', '.join(cfg.schedule_drives_weekend_times)})"
+        f" *Drives:          {'ON' if cfg.schedule_drives_enabled else 'OFF'} (weekday: {', '.join(cfg.schedule_drives_weekday_times)}, weekend: {', '.join(cfg.schedule_drives_weekend_times)})"
     )
     lines.append(
         f"  Dreams:          {'ON' if cfg.schedule_dreams_enabled else 'OFF'} (at {cfg.schedule_dreams_time}, stagger {cfg.schedule_dreams_stagger_minutes}m)"
