@@ -803,6 +803,49 @@ def create_task(
     return task_id, destination
 
 
+def create_task_human(
+    title: str,
+    body: str = "",
+    assigned_to: str | None = None,
+    priority: str = "medium",
+    tags: list[str] | None = None,
+    *,
+    config: Config | None = None,
+) -> tuple[str, str]:
+    """Create a task as a human. Returns (task_id, destination).
+
+    Default destination is backlog/. If assigned_to is provided,
+    the task goes directly to queued/.
+    """
+    cfg = config or get_config()
+    date_prefix = datetime.now(cfg.tz).strftime("task-%Y-%m%d")
+
+    if assigned_to:
+        dest_dir = cfg.tasks_queued
+        destination = "queued"
+    else:
+        dest_dir = cfg.tasks_backlog
+        destination = "backlog"
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    task_id = next_id(date_prefix, dest_dir, config=cfg)
+
+    meta: dict = {
+        "id": task_id,
+        "title": title,
+        "created_by": "human",
+        "assigned_to": assigned_to or "",
+        "priority": priority,
+        "status": destination,
+        "tags": tags or [],
+        "created_at": _now_iso(config=cfg),
+    }
+
+    _write_frontmatter(dest_dir / f"{task_id}.md", meta, body)
+
+    return task_id, destination
+
+
 def promote_task(task_id: str, *, config: Config | None = None) -> Path | None:
     """Move backlog/ -> queued/. Called by human via dashboard or CLI."""
     cfg = config or get_config()

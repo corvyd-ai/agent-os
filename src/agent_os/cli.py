@@ -132,17 +132,7 @@ EOF
 
   3. Create a task:
 
-  cat > agents/tasks/queued/task-001.md << 'EOF'
----
-id: task-001
-title: Write a hello world script
-assigned_to: agent-001-builder
-priority: medium
----
-
-Write a Python script that prints "Hello from agent-os."
-Write it to scripts/hello.py.
-EOF
+  agent-os new "Write a hello world script" -a agent-001-builder
 
   4. Set your API key:
 
@@ -180,6 +170,63 @@ def cmd_status(args):
     output, exit_code = format_status(no_color=no_color)
     print(output)
     sys.exit(exit_code)
+
+
+# --- new command ---
+
+
+def cmd_new(args):
+    """Create a new task."""
+    _set_root(args)
+    import subprocess
+    import tempfile
+
+    from .core import create_task_human
+
+    title = args.title
+    assigned_to = args.assign
+    priority = args.priority
+    tags = args.tag or []
+
+    # Validate assignee exists in registry if provided
+    if assigned_to:
+        from .config import get_config
+
+        cfg = get_config()
+        registry_dir = cfg.company_root / "agents" / "registry"
+        agent_file = registry_dir / f"{assigned_to}.md"
+        if not agent_file.exists():
+            print(f"Error: agent '{assigned_to}' not found in registry.", file=sys.stderr)
+            print(f"\nHint: check available agents with: ls {registry_dir}/", file=sys.stderr)
+            sys.exit(1)
+
+    # Get body from: --edit flag, stdin pipe, or empty
+    body = ""
+    if args.edit:
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR", "vi")
+        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
+            f.write(f"# {title}\n\n")
+            f.write("<!-- Describe the task below. This line will be included. -->\n")
+            tmp_path = f.name
+        try:
+            subprocess.run([editor, tmp_path], check=True)
+            body = Path(tmp_path).read_text()
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+    elif not sys.stdin.isatty():
+        body = sys.stdin.read()
+
+    task_id, destination = create_task_human(
+        title=title,
+        body=body,
+        assigned_to=assigned_to,
+        priority=priority,
+        tags=tags,
+    )
+
+    print(f"Created {task_id} -> {destination}/")
+    if not assigned_to:
+        print("Assign and promote with: agent-os backlog promote", task_id)
 
 
 # --- cycle command ---
@@ -622,6 +669,25 @@ def main():
     p_init = subparsers.add_parser("init", help="Create a new agent-os company")
     p_init.add_argument("name", help="Name for the company directory")
     p_init.set_defaults(func=cmd_init)
+
+    # new
+    p_new = subparsers.add_parser("new", help="Create a new task")
+    p_new.add_argument("title", help="Task title (the only required field)")
+    p_new.add_argument(
+        "-a", "--assign", default=None, metavar="AGENT", help="Assign to agent (sends to queued/ instead of backlog/)"
+    )
+    p_new.add_argument(
+        "-p",
+        "--priority",
+        default="medium",
+        choices=["low", "medium", "high", "critical"],
+        help="Priority level (default: medium)",
+    )
+    p_new.add_argument("-t", "--tag", action="append", metavar="TAG", help="Add a tag (repeatable)")
+    p_new.add_argument("-e", "--edit", action="store_true", help="Open $EDITOR to write the task body")
+    p_new.add_argument("--root", default=None, help="Company root directory")
+    p_new.add_argument("--config", default=None, help="Path to agent-os.toml config file")
+    p_new.set_defaults(func=cmd_new)
 
     # status
     p_status = subparsers.add_parser("status", help="Show compact system status overview")
