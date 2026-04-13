@@ -2,7 +2,7 @@
 
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agent_os.config import Config
 from agent_os.maintenance import run_archive, run_log_archive, run_manifest, run_watchdog
@@ -122,7 +122,7 @@ class TestRunWatchdog:
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         log_file = agent_dir / f"{today}.jsonl"
         # Entry from 2 hours ago
-        old_ts = datetime.now(UTC).replace(hour=max(0, datetime.now(UTC).hour - 2))
+        old_ts = datetime.now(UTC) - timedelta(hours=2)
         entry = {"timestamp": old_ts.isoformat(), "action": "test"}
         log_file.write_text(json.dumps(entry) + "\n")
 
