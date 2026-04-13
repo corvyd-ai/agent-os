@@ -11,6 +11,7 @@ Usage:
     agent-os standing-orders agent-001  # Run standing orders if due
     agent-os drives agent-001         # Run drive consultation
     agent-os dream agent-001          # Run dream cycle
+    agent-os update                   # Self-update agent-os from git
     agent-os dashboard                # Launch the dashboard (coming soon)
 """
 
@@ -484,6 +485,117 @@ def cmd_archive(args):
     print(f"Total: {result.total_archived} items")
 
 
+# --- update command ---
+
+
+def _find_repo_root() -> Path:
+    """Find the git repo root for the installed agent-os package."""
+    pkg_dir = Path(__file__).resolve().parent
+    # Walk up from the package directory to find the .git root
+    current = pkg_dir
+    while current != current.parent:
+        if (current / ".git").exists():
+            return current
+        current = current.parent
+    return None
+
+
+def cmd_update(args):
+    """Self-update agent-os from its git repository."""
+    import subprocess
+
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        print("Error: agent-os is not installed from a git repository.", file=sys.stderr)
+        print("Install from git to use self-update:", file=sys.stderr)
+        print("  git clone https://github.com/corvyd-ai/agent-os && cd agent-os && pip install -e .", file=sys.stderr)
+        sys.exit(1)
+
+    def git(*cmd):
+        result = subprocess.run(
+            ["git", *cmd],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        return result
+
+    # Determine the current branch
+    r = git("rev-parse", "--abbrev-ref", "HEAD")
+    if r.returncode != 0:
+        print("Error: could not determine current branch.", file=sys.stderr)
+        sys.exit(1)
+    branch = r.stdout.strip()
+
+    # Check for uncommitted changes
+    r = git("status", "--porcelain")
+    if r.stdout.strip():
+        print(f"Warning: agent-os repo has uncommitted changes at {repo_root}", file=sys.stderr)
+        print("Stash or commit them before updating.", file=sys.stderr)
+        sys.exit(1)
+
+    # Fetch latest
+    print(f"Fetching origin/{branch}...")
+    r = git("fetch", "origin", branch)
+    if r.returncode != 0:
+        print(f"Error: git fetch failed: {r.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if already up to date
+    r = git("rev-list", f"HEAD..origin/{branch}", "--count")
+    new_commits = int(r.stdout.strip()) if r.returncode == 0 else 0
+
+    if new_commits == 0:
+        from . import __version__
+
+        print(f"Already up to date (v{__version__} on {branch}).")
+        return
+
+    # Show what's new
+    print(f"\n{new_commits} new commit(s):\n")
+    git_log = git("log", f"HEAD..origin/{branch}", "--oneline", "--no-decorate")
+    print(git_log.stdout.strip())
+
+    if not getattr(args, "yes", False):
+        try:
+            answer = input("\nApply update? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+        if answer and answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    # Pull (fast-forward only)
+    print(f"\nPulling origin/{branch}...")
+    r = git("pull", "--ff-only", "origin", branch)
+    if r.returncode != 0:
+        print(f"Error: git pull failed: {r.stderr.strip()}", file=sys.stderr)
+        print("Your branch may have diverged. Resolve manually.", file=sys.stderr)
+        sys.exit(1)
+
+    # Reinstall
+    print("Reinstalling...")
+    r = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(f"Error: pip install failed: {r.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    # Show new version — re-import from the freshly installed package
+    r = subprocess.run(
+        [sys.executable, "-c", "from agent_os import __version__; print(__version__)"],
+        capture_output=True,
+        text=True,
+    )
+    new_version = r.stdout.strip() if r.returncode == 0 else "unknown"
+    print(f"\nUpdated to v{new_version}.")
+
+
 # --- manifest command ---
 
 
@@ -788,6 +900,11 @@ def main():
     p_watchdog = subparsers.add_parser("watchdog", help="Check agent liveness")
     _add_common_args(p_watchdog)
     p_watchdog.set_defaults(func=cmd_watchdog)
+
+    # update
+    p_update = subparsers.add_parser("update", help="Self-update agent-os from git")
+    p_update.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    p_update.set_defaults(func=cmd_update)
 
     # cron
     p_cron = subparsers.add_parser("cron", help="Manage the agent-os cron entry")
