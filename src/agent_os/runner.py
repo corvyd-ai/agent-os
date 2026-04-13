@@ -191,6 +191,7 @@ def _make_options(
     system_prompt: str,
     *,
     config: Config | None = None,
+    cwd: Path | None = None,
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
     model: str | None = None,
@@ -216,7 +217,7 @@ def _make_options(
         model=model or agent_config.model,
         max_turns=max_turns or cfg.max_turns_per_invocation,
         max_budget_usd=max_budget_usd or cfg.max_budget_per_invocation_usd,
-        cwd=str(cfg.company_root),
+        cwd=str(cwd or cfg.company_root),
         mcp_servers={"aios": aios_server},
     )
     if stderr_capture is not None:
@@ -453,54 +454,99 @@ async def run_agent(
             sys.exit(1)
         log.info("claimed_task", f"Claimed task: {task_path.name}", {"task_id": task_id})
 
-        try:
-            task_meta, task_body = aios._parse_frontmatter(task_path)
-            task_context = task_path.read_text()
-            prompt = build_task_prompt(agent_config, task_meta, task_body)
+        task_meta, task_body = aios._parse_frontmatter(task_path)
+        task_context = task_path.read_text()
 
-            aios.log_action(
-                agent_config.agent_id,
-                "claimed_task",
-                f"Claimed {task_id}",
-                {"task_id": task_id, "path": str(task_path)},
-                config=cfg,
-            )
+        aios.log_action(
+            agent_config.agent_id,
+            "claimed_task",
+            f"Claimed {task_id}",
+            {"task_id": task_id, "path": str(task_path)},
+            config=cfg,
+        )
 
-            system_prompt = composer.build_system_prompt(agent_config, task_context)
+        # Determine if this task uses workspace mode
+        use_workspace = cfg.project_enabled and agent_config.role in cfg.builder_roles
 
-            log.info("sdk_invoke", "Invoking Claude Agent SDK", {"model": agent_config.model, "task": task_id})
-
-            stderr_capture = StderrCapture(agent_id)
-            options = _make_options(
+        if use_workspace:
+            await _run_agent_with_workspace(
                 agent_config,
-                system_prompt,
+                task_id,
+                task_meta,
+                task_body,
+                task_context,
+                composer=composer,
                 config=cfg,
                 max_turns=max_turns,
                 max_budget_usd=max_budget_usd,
-                stderr_capture=stderr_capture,
             )
-
-            result_msg = await _run_query(
-                prompt,
-                options,
-                label=f"task {task_id}",
-                stderr_capture=stderr_capture,
-                max_retries=2,
+        else:
+            await _run_agent_standard(
+                agent_config,
+                task_id,
+                task_meta,
+                task_body,
+                task_context,
+                composer=composer,
+                config=cfg,
+                max_turns=max_turns,
+                max_budget_usd=max_budget_usd,
             )
-        except RuntimeError as e:
-            error_detail = str(e)
-            stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
-            error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_text, task=task_id)
-            log.error("sdk_error", error_detail, {**error_refs, "task": task_id})
-            aios.fail_task(task_id, error_detail, error_refs=error_refs, config=cfg)
-            sys.exit(1)
-        except Exception as e:
-            error_detail = f"Pre-flight error: {e}"
-            log.error("preflight_error", error_detail, {"task": task_id})
-            aios.fail_task(task_id, error_detail, config=cfg)
-            sys.exit(1)
     else:
         log.error("no_mode", "Must specify --task or --cycle")
+        sys.exit(1)
+
+
+async def _run_agent_standard(
+    agent_config,
+    task_id: str,
+    task_meta: dict,
+    task_body: str,
+    task_context: str,
+    *,
+    composer: PromptComposer,
+    config: Config,
+    max_turns: int | None = None,
+    max_budget_usd: float | None = None,
+) -> None:
+    """Original task execution path — no workspace isolation."""
+    cfg = config
+    log = get_logger(agent_config.agent_id)
+
+    try:
+        prompt = build_task_prompt(agent_config, task_meta, task_body)
+        system_prompt = composer.build_system_prompt(agent_config, task_context)
+
+        log.info("sdk_invoke", "Invoking Claude Agent SDK", {"model": agent_config.model, "task": task_id})
+
+        stderr_capture = StderrCapture(agent_config.agent_id)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            stderr_capture=stderr_capture,
+        )
+
+        result_msg = await _run_query(
+            prompt,
+            options,
+            label=f"task {task_id}",
+            stderr_capture=stderr_capture,
+            max_retries=2,
+        )
+    except RuntimeError as e:
+        error_detail = str(e)
+        stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+        error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_text, task=task_id)
+        log.error("sdk_error", error_detail, {**error_refs, "task": task_id})
+        aios.fail_task(task_id, error_detail, error_refs=error_refs, config=cfg)
+        sys.exit(1)
+    except Exception as e:
+        error_detail = f"Pre-flight error: {e}"
+        log.error("preflight_error", error_detail, {"task": task_id})
+        aios.fail_task(task_id, error_detail, config=cfg)
         sys.exit(1)
 
     if result_msg:
@@ -515,7 +561,7 @@ async def run_agent(
             {"task": task_id, "cost_usd": cost, "turns": turns, "duration_ms": duration},
         )
 
-        if task_id and not result_msg.is_error:
+        if not result_msg.is_error:
             if agent_config.role in cfg.builder_roles and task_meta:
                 code_dir = _find_product_code_dir(task_meta, config=cfg)
                 if code_dir:
@@ -545,9 +591,217 @@ async def run_agent(
             else:
                 aios.complete_task(task_id, config=cfg)
                 log.info("completed_task", f"Completed {task_id}", {"task_id": task_id})
-        elif task_id and result_msg.is_error:
+        else:
             aios.fail_task(task_id, result_msg.result or "Agent returned error", config=cfg)
             log.error("task_failed", f"Task {task_id} moved to failed/", {"task_id": task_id})
+
+
+async def _run_agent_with_workspace(
+    agent_config,
+    task_id: str,
+    task_meta: dict,
+    task_body: str,
+    task_context: str,
+    *,
+    composer: PromptComposer,
+    config: Config,
+    max_turns: int | None = None,
+    max_budget_usd: float | None = None,
+) -> None:
+    """Workspace-aware task execution: worktree isolation, validation, commit, push."""
+    from .workspace import (
+        WorkspaceError,
+        cleanup_workspace,
+        commit_workspace,
+        create_workspace,
+        push_workspace,
+        setup_workspace,
+        validate_workspace,
+    )
+
+    cfg = config
+    log = get_logger(agent_config.agent_id)
+    workspace = None
+
+    try:
+        # --- Create workspace ---
+        log.info("workspace_create", f"Creating workspace for {task_id}", {"task_id": task_id})
+        workspace = create_workspace(task_id, config=cfg)
+        log.info(
+            "workspace_created",
+            f"Workspace ready: {workspace.branch} at {workspace.worktree_path}",
+            {"task_id": task_id, "branch": workspace.branch, "worktree": str(workspace.worktree_path)},
+        )
+
+        # --- Setup workspace ---
+        if cfg.project_setup_commands:
+            log.info("workspace_setup", "Running setup commands", {"task_id": task_id})
+            ok, setup_output = setup_workspace(workspace, config=cfg)
+            if not ok:
+                log.error("workspace_setup_failed", "Setup commands failed", {"task_id": task_id})
+                aios.fail_task(task_id, f"Workspace setup failed:\n{setup_output[-2000:]}", config=cfg)
+                cleanup_workspace(workspace, delete_branch=True, config=cfg)
+                return
+
+        # --- Build prompts with workspace context ---
+        prompt = build_task_prompt(agent_config, task_meta, task_body)
+        system_prompt = composer.build_system_prompt(
+            agent_config,
+            task_context,
+            workspace_branch=workspace.branch,
+            workspace_code_dir=str(workspace.code_dir),
+        )
+
+        stderr_capture = StderrCapture(agent_config.agent_id)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            cwd=workspace.code_dir,
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            stderr_capture=stderr_capture,
+        )
+
+        # --- Execute with validation retry loop ---
+        max_retries = cfg.project_validate_max_retries if cfg.project_validate_on_failure == "retry" else 0
+        validate_output = ""
+
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                retry_prompt = (
+                    f"Your previous work failed validation (attempt {attempt}/{max_retries + 1}).\n\n"
+                    f"Validation output:\n```\n{validate_output[-3000:]}\n```\n\n"
+                    f"Fix the issues and try again."
+                )
+                log.info(
+                    "workspace_retry",
+                    f"Validation retry {attempt}/{max_retries}",
+                    {"task_id": task_id, "attempt": attempt},
+                )
+                result_msg = await _run_query(
+                    retry_prompt,
+                    options,
+                    label=f"task {task_id} (retry {attempt})",
+                    stderr_capture=stderr_capture,
+                    max_retries=2,
+                )
+            else:
+                log.info(
+                    "sdk_invoke",
+                    "Invoking Claude Agent SDK (workspace mode)",
+                    {
+                        "model": agent_config.model,
+                        "task": task_id,
+                        "branch": workspace.branch,
+                    },
+                )
+                result_msg = await _run_query(
+                    prompt,
+                    options,
+                    label=f"task {task_id}",
+                    stderr_capture=stderr_capture,
+                    max_retries=2,
+                )
+
+            if result_msg:
+                cost = result_msg.total_cost_usd or 0.0
+                aios.log_cost(
+                    agent_config.agent_id,
+                    task_id,
+                    cost,
+                    result_msg.duration_ms,
+                    agent_config.model,
+                    result_msg.num_turns,
+                    config=cfg,
+                )
+                log.info(
+                    "sdk_complete",
+                    f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
+                    {
+                        "task": task_id,
+                        "cost_usd": cost,
+                        "attempt": attempt,
+                    },
+                )
+
+                if result_msg.is_error:
+                    aios.fail_task(task_id, result_msg.result or "Agent returned error", config=cfg)
+                    log.error("task_failed", f"Task {task_id} agent error", {"task_id": task_id})
+                    cleanup_workspace(workspace, delete_branch=True, config=cfg)
+                    return
+
+            # --- Validate ---
+            if cfg.project_validate_commands:
+                log.info("workspace_validate", f"Running validation (attempt {attempt + 1})", {"task_id": task_id})
+                valid, validate_output = validate_workspace(workspace, config=cfg)
+                if valid:
+                    log.info("workspace_validate_passed", "Validation passed", {"task_id": task_id})
+                    break
+                else:
+                    log.warn(
+                        "workspace_validate_failed",
+                        f"Validation failed (attempt {attempt + 1})",
+                        {
+                            "task_id": task_id,
+                            "output": validate_output[:500],
+                        },
+                    )
+            else:
+                break  # No validation commands — accept immediately
+        else:
+            # All retries exhausted
+            aios.fail_task(
+                task_id,
+                f"Validation failed after {max_retries + 1} attempts:\n{validate_output[-2000:]}",
+                config=cfg,
+            )
+            log.error("workspace_validate_exhausted", "Validation retries exhausted", {"task_id": task_id})
+            cleanup_workspace(workspace, config=cfg)  # Keep branch for debugging
+            return
+
+        # --- Commit + Push ---
+        sha = commit_workspace(workspace, task_meta, agent_config.agent_id, config=cfg)
+        if sha:
+            log.info("workspace_committed", f"Committed {sha[:8]}", {"task_id": task_id, "sha": sha})
+            push_ok, push_output = push_workspace(workspace, config=cfg)
+            if push_ok:
+                log.info("workspace_pushed", f"Pushed {workspace.branch}", {"task_id": task_id})
+            else:
+                log.warn(
+                    "workspace_push_failed",
+                    f"Push failed (non-fatal): {push_output[:200]}",
+                    {
+                        "task_id": task_id,
+                    },
+                )
+        else:
+            log.info("workspace_no_changes", "No code changes to commit", {"task_id": task_id})
+
+        # --- Complete task ---
+        aios.complete_task(task_id, config=cfg)
+        log.info("completed_task", f"Completed {task_id}", {"task_id": task_id, "branch": workspace.branch})
+        cleanup_workspace(workspace, config=cfg)
+
+    except WorkspaceError as e:
+        log.error("workspace_error", str(e), {"task_id": task_id})
+        aios.fail_task(task_id, f"Workspace error: {e}", config=cfg)
+        if workspace:
+            cleanup_workspace(workspace, delete_branch=True, config=cfg)
+    except RuntimeError as e:
+        error_detail = str(e)
+        log.error("sdk_error", error_detail, {"task_id": task_id})
+        aios.fail_task(task_id, error_detail, config=cfg)
+        if workspace:
+            cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        sys.exit(1)
+    except Exception as e:
+        error_detail = f"Workspace task error: {e}"
+        log.error("workspace_task_error", error_detail, {"task_id": task_id})
+        aios.fail_task(task_id, error_detail, config=cfg)
+        if workspace:
+            cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        sys.exit(1)
 
 
 async def run_drive_consultation(

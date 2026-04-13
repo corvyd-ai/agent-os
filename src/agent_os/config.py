@@ -125,6 +125,20 @@ class Config:
     schedule_watchdog_alert_threshold_minutes: int = 45
     schedule_watchdog_alert_hook: str = ""
 
+    # --- Project (SDLC) ---
+    project_repo_path: str = "."  # relative to company_root, or absolute
+    project_default_branch: str = "main"
+    project_push: bool = True
+    project_remote: str = "origin"
+    project_code_dir: str = "."  # working dir within repo for agents
+    project_worktrees_dir: str = ".worktrees"  # where worktrees are created
+    project_setup_commands: list[str] = field(default_factory=list)
+    project_setup_timeout: int = 300
+    project_validate_commands: list[str] = field(default_factory=list)
+    project_validate_timeout: int = 600
+    project_validate_on_failure: str = "retry"  # "fail" or "retry"
+    project_validate_max_retries: int = 2
+
     # --- Budget & turn limits (per-invocation) ---
 
     # Standard task invocation
@@ -324,6 +338,39 @@ class Config:
         if fr:
             kwargs["feedback_routing"] = dict(fr)
 
+        # [project]
+        project = data.get("project", {})
+        if "repo_path" in project:
+            kwargs["project_repo_path"] = project["repo_path"]
+        if "default_branch" in project:
+            kwargs["project_default_branch"] = project["default_branch"]
+        if "push" in project:
+            kwargs["project_push"] = bool(project["push"])
+        if "remote" in project:
+            kwargs["project_remote"] = project["remote"]
+        if "code_dir" in project:
+            kwargs["project_code_dir"] = project["code_dir"]
+        if "worktrees_dir" in project:
+            kwargs["project_worktrees_dir"] = project["worktrees_dir"]
+
+        # [project.setup]
+        setup = project.get("setup", {})
+        if "commands" in setup:
+            kwargs["project_setup_commands"] = list(setup["commands"])
+        if "timeout" in setup:
+            kwargs["project_setup_timeout"] = int(setup["timeout"])
+
+        # [project.validate]
+        validate = project.get("validate", {})
+        if "commands" in validate:
+            kwargs["project_validate_commands"] = list(validate["commands"])
+        if "timeout" in validate:
+            kwargs["project_validate_timeout"] = int(validate["timeout"])
+        if "on_failure" in validate:
+            kwargs["project_validate_on_failure"] = validate["on_failure"]
+        if "max_retries" in validate:
+            kwargs["project_validate_max_retries"] = int(validate["max_retries"])
+
         return cls(**kwargs)
 
     @classmethod
@@ -476,6 +523,24 @@ class Config:
     @property
     def pre_done_checks_script(self) -> Path:
         return self.operations_dir / "scripts" / "pre-done-checks.sh"
+
+    # Project (SDLC) derived paths
+    @property
+    def project_enabled(self) -> bool:
+        """True if [project] section was configured with actionable commands."""
+        return bool(self.project_validate_commands or self.project_setup_commands)
+
+    @property
+    def repo_root(self) -> Path:
+        """Absolute path to the git repository root."""
+        p = Path(self.project_repo_path)
+        return p if p.is_absolute() else self.company_root / p
+
+    @property
+    def worktrees_root(self) -> Path:
+        """Absolute path to the worktrees directory."""
+        p = Path(self.project_worktrees_dir)
+        return p if p.is_absolute() else self.company_root / p
 
 
 # --- Singleton ---

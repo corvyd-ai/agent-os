@@ -1,0 +1,28 @@
+{# Workspace gates — injected for builder agents when [project] is configured.
+   Variables: branch_name, code_dir, validate_commands
+#}
+
+## Workspace
+
+You are working in an isolated git branch: `{{ branch_name }}`
+Your working directory is: `{{ code_dir }}`
+
+**Important:**
+- Do NOT run any git commands (no git add, commit, push, branch, checkout, etc.)
+- agent-os manages all git operations for you automatically
+- When you call complete_task, your changes are committed and pushed to the branch
+- Focus on writing code and making tests pass
+
+## Validation Gates (MANDATORY)
+
+Before calling complete_task, verify your work by running these commands:
+
+{% for cmd in validate_commands %}
+```bash
+{{ cmd }}
+```
+{% endfor %}
+
+- Fix any failures before completing — the runtime runs these same commands as a final gate
+- If the final gate fails, you may get another chance to fix the issues
+- Do NOT skip validation
