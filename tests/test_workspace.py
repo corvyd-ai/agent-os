@@ -1,0 +1,394 @@
+"""Tests for agent_os.workspace — git worktree lifecycle for the agentic SDLC."""
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from agent_os.config import Config
+from agent_os.workspace import (
+    cleanup_workspace,
+    commit_workspace,
+    create_workspace,
+    get_workspace,
+    push_workspace,
+    setup_workspace,
+    validate_workspace,
+)
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a minimal git repo with an initial commit."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "checkout", "-b", "main"], cwd=str(repo), capture_output=True, check=True)
+    # Configure git identity for commits
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), capture_output=True, check=True)
+    # Initial commit (git worktree requires at least one commit)
+    (repo / "README.md").write_text("# Test Repo\n")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=str(repo), capture_output=True, check=True)
+    return repo
+
+
+@pytest.fixture
+def project_config(git_repo, tmp_path):
+    """Config with project enabled, pointing at the git_repo."""
+    company_root = git_repo  # Company root IS the repo
+    # Build the agent-os directory tree
+    (company_root / "agents" / "tasks" / "queued").mkdir(parents=True)
+    (company_root / "agents" / "tasks" / "in-progress").mkdir(parents=True)
+    (company_root / "agents" / "tasks" / "done").mkdir(parents=True)
+    (company_root / "agents" / "tasks" / "failed").mkdir(parents=True)
+    (company_root / "agents" / "tasks" / "backlog").mkdir(parents=True)
+    (company_root / "agents" / "tasks" / "declined").mkdir(parents=True)
+    (company_root / "agents" / "tasks" / "in-review").mkdir(parents=True)
+    return Config(
+        company_root=company_root,
+        project_repo_path=".",
+        project_default_branch="main",
+        project_push=False,  # No remote in tests
+        project_validate_commands=["true"],  # Always passes
+        project_worktrees_dir=str(tmp_path / "worktrees"),
+    )
+
+
+# ── create_workspace ─────────────────────────────────────────────────
+
+
+class TestCreateWorkspace:
+    def test_creates_worktree_and_branch(self, project_config):
+        ws = create_workspace("task-2026-0412-001", config=project_config)
+        assert ws.worktree_path.exists()
+        assert ws.branch == "agent/task-2026-0412-001"
+        # Verify git branch exists
+        result = subprocess.run(
+            ["git", "branch", "--list", ws.branch],
+            cwd=str(project_config.repo_root),
+            capture_output=True,
+            text=True,
+        )
+        assert "agent/task-2026-0412-001" in result.stdout
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_worktree_has_repo_contents(self, project_config):
+        ws = create_workspace("task-2026-0412-002", config=project_config)
+        assert (ws.worktree_path / "README.md").exists()
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_code_dir_matches_worktree_when_dot(self, project_config):
+        ws = create_workspace("task-2026-0412-003", config=project_config)
+        assert ws.code_dir == ws.worktree_path
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_code_dir_with_subdir(self, git_repo, tmp_path):
+        # Create a subdirectory in the repo
+        (git_repo / "products" / "myapp").mkdir(parents=True)
+        (git_repo / "products" / "myapp" / "index.js").write_text("console.log('hello')")
+        subprocess.run(["git", "add", "-A"], cwd=str(git_repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "Add myapp"], cwd=str(git_repo), capture_output=True, check=True)
+
+        cfg = Config(
+            company_root=git_repo,
+            project_code_dir="products/myapp",
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-sub-001", config=cfg)
+        assert ws.code_dir == ws.worktree_path / "products" / "myapp"
+        assert (ws.code_dir / "index.js").exists()
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_cleans_up_stale_worktree(self, project_config):
+        # Create first workspace
+        ws1 = create_workspace("task-stale-001", config=project_config)
+        assert ws1.worktree_path.exists()
+        # Create again with same ID — should clean up and recreate
+        ws2 = create_workspace("task-stale-001", config=project_config)
+        assert ws2.worktree_path.exists()
+        cleanup_workspace(ws2, delete_branch=True, config=project_config)
+
+
+# ── setup_workspace ──────────────────────────────────────────────────
+
+
+class TestSetupWorkspace:
+    def test_runs_commands_successfully(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_setup_commands=["echo hello", "echo world"],
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-setup-001", config=cfg)
+        ok, output = setup_workspace(ws, config=cfg)
+        assert ok is True
+        assert "hello" in output
+        assert "world" in output
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_fails_on_bad_command(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_setup_commands=["true", "false", "echo unreachable"],
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-setup-002", config=cfg)
+        ok, output = setup_workspace(ws, config=cfg)
+        assert ok is False
+        assert "unreachable" not in output  # Stops after failure
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_no_setup_commands_is_ok(self, project_config):
+        cfg = Config(
+            company_root=project_config.company_root,
+            project_setup_commands=[],
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(project_config.worktrees_root),
+        )
+        ws = create_workspace("task-setup-003", config=cfg)
+        ok, output = setup_workspace(ws, config=cfg)
+        assert ok is True
+        assert output == ""
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+
+# ── validate_workspace ───────────────────────────────────────────────
+
+
+class TestValidateWorkspace:
+    def test_passes_when_all_commands_succeed(self, project_config):
+        ws = create_workspace("task-val-001", config=project_config)
+        ok, _output = validate_workspace(ws, config=project_config)
+        assert ok is True
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_fails_when_command_fails(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_validate_commands=["true", "false"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-val-002", config=cfg)
+        ok, _output = validate_workspace(ws, config=cfg)
+        assert ok is False
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_no_validate_commands_is_ok(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_validate_commands=[],
+            project_setup_commands=["true"],  # Need something for project_enabled
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-val-003", config=cfg)
+        ok, output = validate_workspace(ws, config=cfg)
+        assert ok is True
+        assert output == ""
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+
+# ── commit_workspace ─────────────────────────────────────────────────
+
+
+class TestCommitWorkspace:
+    def test_commits_changes(self, project_config):
+        ws = create_workspace("task-commit-001", config=project_config)
+        # Make a change in the worktree
+        (ws.worktree_path / "new_file.py").write_text("print('hello')\n")
+
+        meta = {"id": "task-commit-001", "title": "Add hello script", "priority": "high"}
+        sha = commit_workspace(ws, meta, "agent-001-builder", config=project_config)
+
+        assert sha is not None
+        assert len(sha) == 40  # Full SHA
+
+        # Verify commit message
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=str(ws.worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        assert "[task-commit-001] Add hello script" in result.stdout
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_returns_none_when_no_changes(self, project_config):
+        ws = create_workspace("task-commit-002", config=project_config)
+        meta = {"id": "task-commit-002", "title": "No-op task"}
+        sha = commit_workspace(ws, meta, "agent-001", config=project_config)
+        assert sha is None
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_commit_message_includes_metadata(self, project_config):
+        ws = create_workspace("task-commit-003", config=project_config)
+        (ws.worktree_path / "file.txt").write_text("content")
+
+        meta = {"id": "task-commit-003", "title": "Build feature", "priority": "critical"}
+        commit_workspace(ws, meta, "agent-002-builder", config=project_config)
+
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%B"],
+            cwd=str(ws.worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        body = result.stdout
+        assert "Agent: agent-002-builder" in body
+        assert "Priority: critical" in body
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+
+# ── push_workspace ───────────────────────────────────────────────────
+
+
+class TestPushWorkspace:
+    def test_skips_when_push_disabled(self, project_config):
+        ws = create_workspace("task-push-001", config=project_config)
+        ok, msg = push_workspace(ws, config=project_config)
+        assert ok is True
+        assert "disabled" in msg.lower() or "no remote" in msg.lower()
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_skips_when_no_remote(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_push=True,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-push-002", config=cfg)
+        ok, msg = push_workspace(ws, config=cfg)
+        assert ok is True
+        assert "no remote" in msg.lower()
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+
+# ── cleanup_workspace ────────────────────────────────────────────────
+
+
+class TestCleanupWorkspace:
+    def test_removes_worktree(self, project_config):
+        ws = create_workspace("task-clean-001", config=project_config)
+        assert ws.worktree_path.exists()
+        cleanup_workspace(ws, config=project_config)
+        assert not ws.worktree_path.exists()
+
+    def test_deletes_branch_when_requested(self, project_config):
+        ws = create_workspace("task-clean-002", config=project_config)
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+        result = subprocess.run(
+            ["git", "branch", "--list", ws.branch],
+            cwd=str(project_config.repo_root),
+            capture_output=True,
+            text=True,
+        )
+        assert ws.branch not in result.stdout
+
+    def test_keeps_branch_by_default(self, project_config):
+        ws = create_workspace("task-clean-003", config=project_config)
+        cleanup_workspace(ws, config=project_config)
+        result = subprocess.run(
+            ["git", "branch", "--list", ws.branch],
+            cwd=str(project_config.repo_root),
+            capture_output=True,
+            text=True,
+        )
+        assert "agent/task-clean-003" in result.stdout
+        # Clean up the branch manually
+        subprocess.run(
+            ["git", "branch", "-D", ws.branch],
+            cwd=str(project_config.repo_root),
+            capture_output=True,
+        )
+
+
+# ── get_workspace ────────────────────────────────────────────────────
+
+
+class TestGetWorkspace:
+    def test_finds_existing_workspace(self, project_config):
+        ws = create_workspace("task-get-001", config=project_config)
+        found = get_workspace("task-get-001", config=project_config)
+        assert found is not None
+        assert found.task_id == "task-get-001"
+        assert found.worktree_path == ws.worktree_path
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_returns_none_for_missing(self, project_config):
+        found = get_workspace("task-nonexistent", config=project_config)
+        assert found is None
+
+
+# ── Config integration ───────────────────────────────────────────────
+
+
+class TestProjectConfig:
+    def test_project_enabled_with_validate(self):
+        cfg = Config(project_validate_commands=["pytest"])
+        assert cfg.project_enabled is True
+
+    def test_project_enabled_with_setup(self):
+        cfg = Config(project_setup_commands=["npm install"])
+        assert cfg.project_enabled is True
+
+    def test_project_disabled_by_default(self):
+        cfg = Config()
+        assert cfg.project_enabled is False
+
+    def test_repo_root_relative(self, tmp_path):
+        cfg = Config(company_root=tmp_path, project_repo_path=".")
+        assert cfg.repo_root == tmp_path
+
+    def test_repo_root_absolute(self, tmp_path):
+        cfg = Config(company_root=tmp_path, project_repo_path="/some/absolute/path")
+        assert cfg.repo_root == Path("/some/absolute/path")
+
+    def test_worktrees_root_relative(self, tmp_path):
+        cfg = Config(company_root=tmp_path, project_worktrees_dir=".worktrees")
+        assert cfg.worktrees_root == tmp_path / ".worktrees"
+
+    def test_from_toml_parses_project(self, tmp_path):
+        toml_content = """\
+[company]
+name = "test"
+root = "."
+
+[project]
+repo_path = "."
+default_branch = "develop"
+push = false
+remote = "upstream"
+code_dir = "src"
+worktrees_dir = ".wt"
+
+[project.setup]
+commands = ["npm install", "pip install -e ."]
+timeout = 120
+
+[project.validate]
+commands = ["pytest", "ruff check ."]
+timeout = 300
+on_failure = "fail"
+max_retries = 1
+"""
+        toml_path = tmp_path / "agent-os.toml"
+        toml_path.write_text(toml_content)
+        cfg = Config.from_toml(toml_path)
+
+        assert cfg.project_default_branch == "develop"
+        assert cfg.project_push is False
+        assert cfg.project_remote == "upstream"
+        assert cfg.project_code_dir == "src"
+        assert cfg.project_worktrees_dir == ".wt"
+        assert cfg.project_setup_commands == ["npm install", "pip install -e ."]
+        assert cfg.project_setup_timeout == 120
+        assert cfg.project_validate_commands == ["pytest", "ruff check ."]
+        assert cfg.project_validate_timeout == 300
+        assert cfg.project_validate_on_failure == "fail"
+        assert cfg.project_validate_max_retries == 1
+        assert cfg.project_enabled is True

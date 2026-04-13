@@ -108,7 +108,21 @@ def cmd_init(args):
         f"daily_cap = 50.00\n"
         f"weekly_cap = 250.00\n"
         f"monthly_cap = 750.00\n"
+        f"\n"
+        f"# Uncomment to enable workspace isolation for builder agents.\n"
+        f"# Agents will work in isolated git branches with automated validation.\n"
+        f"# [project]\n"
+        f'# default_branch = "main"\n'
+        f"#\n"
+        f"# [project.setup]\n"
+        f'# commands = ["npm install"]\n'
+        f"#\n"
+        f"# [project.validate]\n"
+        f'# commands = ["npm test", "npm run lint"]\n'
     )
+
+    # Create .gitignore with worktrees directory
+    (target / ".gitignore").write_text("# Agent worktrees (managed by agent-os)\n.worktrees/\n\n# Environment\n.env\n")
 
     print(f"""\
 Done! Your company is ready at {target}/

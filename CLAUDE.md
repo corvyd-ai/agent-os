@@ -94,7 +94,8 @@ src/agent_os/
   runner.py       # Agent cycle runner (task/message/thread dispatch)
   composer.py     # Prompt composition (4-layer attention model)
   core.py         # File operations (tasks, messages, broadcasts, IDs)
-  prompts/        # Default Jinja2 templates (preamble, interactive, quality gates)
+  workspace.py    # Git worktree lifecycle for the agentic SDLC
+  prompts/        # Default Jinja2 templates (preamble, quality gates, workspace gates)
   dashboard/      # Dashboard (FastAPI backend + React/Vite frontend)
     frontend/     # React/Vite app (npm run build → dist/)
     Makefile      # Dev server commands (make dev)
@@ -108,11 +109,12 @@ tests/            # pytest suite
 
 | File | What it does |
 |------|-------------|
-| `src/agent_os/cli.py` | All CLI commands: `init`, `cycle`, `run`, `cron`, `budget`, `task`, `drives`, `dream`, `standing-orders`, `dashboard` |
+| `src/agent_os/cli.py` | All CLI commands: `init`, `new`, `status`, `cycle`, `run`, `cron`, `budget`, `task`, `drives`, `dream`, `standing-orders`, `dashboard` |
 | `src/agent_os/config.py` | `Config` dataclass, `Config.from_toml()`, `Config.discover_toml()` — TOML schema definition |
-| `src/agent_os/runner.py` | `run_cycle()` — the main loop: check tasks, messages, threads, exit if idle |
-| `src/agent_os/composer.py` | `compose_system_prompt()` — builds the 4-layer attention prompt |
-| `src/agent_os/core.py` | All file operations: `create_task()`, `send_message()`, `post_broadcast()`, `next_id()`, `claim_task()`, `complete_task()` |
+| `src/agent_os/runner.py` | `run_cycle()` — the main loop: check tasks, messages, threads, exit if idle. `_run_agent_with_workspace()` — workspace-aware task execution |
+| `src/agent_os/composer.py` | `build_system_prompt()` — builds the 4-layer attention prompt (workspace-aware) |
+| `src/agent_os/core.py` | All file operations: `create_task()`, `create_task_human()`, `send_message()`, `post_broadcast()`, `next_id()`, `claim_task()`, `complete_task()` |
+| `src/agent_os/workspace.py` | Git worktree lifecycle: `create_workspace()`, `setup_workspace()`, `validate_workspace()`, `commit_workspace()`, `push_workspace()`, `cleanup_workspace()` |
 
 ## Available Skills
 
@@ -242,6 +244,8 @@ Body contains identity description, core capabilities, and drives in markdown.
 
 ```
 <company>/
+  .worktrees/              # Git worktrees for active tasks (gitignored)
+    <task-id>/             # One isolated worktree per in-progress task
   agents/
     registry/              # Agent definition files
     state/<agent-id>/      # Per-agent state
@@ -284,6 +288,37 @@ Tasks move between directories — the directory IS the status:
 
 Agents with medium autonomy create tasks in `backlog/` (requires human `promote_task` to move to `queued/`).
 
+### Workspace SDLC (Code Tasks)
+
+When a `[project]` section is configured in `agent-os.toml`, builder agents (role `Software Engineer`) get an automated software development lifecycle. Agents never interact with git directly — agent-os handles it as infrastructure.
+
+**Flow when a builder agent claims a task:**
+
+1. **Create workspace** — `git worktree add` creates an isolated branch `agent/{task-id}` from the default branch
+2. **Setup** — runs `[project.setup].commands` in the worktree (e.g. `npm install`)
+3. **Agent works** — the SDK runs with `cwd` set to the worktree; agent's file tools operate on isolated code
+4. **Validate** — runs `[project.validate].commands` (e.g. `pytest`, `ruff check .`)
+5. **Retry** — if validation fails and `on_failure = "retry"`, the agent gets another chance with the error output
+6. **Commit + push** — `git add -A && git commit` with auto-generated message, then `git push` to remote
+7. **Complete + cleanup** — task moves to `done/`, worktree is removed
+
+**Key design properties:**
+- MCP lifecycle tools (complete_task, send_message, etc.) always operate on the main company filesystem, never the worktree
+- Branch naming: `agent/{task-id}` — deterministic, unique, easy to find/clean
+- Push failures are non-fatal — work is committed locally
+- No changes to commit = still completes the task (agent may have determined no changes needed)
+- Without `[project]` config, agents work exactly as before (no workspace, `cwd=company_root`)
+
+### Task Creation
+
+Tasks can be created via:
+- **CLI:** `agent-os new "Fix the bug"` (goes to `backlog/`), or `agent-os new "Fix the bug" -a agent-001` (goes to `queued/`)
+- **Skill:** `/create-task` in Claude Code (conversational)
+- **Agents:** `create_task()` via MCP tools (respects autonomy level)
+- **Dashboard:** Task creation UI
+
+The `agent-os new` command is the primary path for humans. Title is the only required input; everything else has defaults. Unassigned tasks default to `backlog/`; `--assign` is required for `queued/`.
+
 ### Configuration
 
 `agent-os.toml` lives alongside the company directory. Key sections:
@@ -311,6 +346,18 @@ enabled = true
 [schedule.cycles]
 enabled = true
 interval_minutes = 15
+
+[project]
+default_branch = "main"
+push = true
+
+[project.setup]
+commands = ["npm install"]
+
+[project.validate]
+commands = ["npm test", "npm run lint"]
+on_failure = "retry"
+max_retries = 2
 
 [prompts]
 override_dir = "prompts"

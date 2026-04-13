@@ -61,16 +61,40 @@ class PromptComposer:
         t = self.env.get_template(template_name)
         return t.render(**kwargs)
 
-    def build_system_prompt(self, agent_config: AgentConfig, task_context: str | None = None) -> str:
+    def build_system_prompt(
+        self,
+        agent_config: AgentConfig,
+        task_context: str | None = None,
+        *,
+        workspace_branch: str | None = None,
+        workspace_code_dir: str | None = None,
+    ) -> str:
         """Assemble the system prompt: preamble → soul → identity → working memory → broadcasts → context.
 
         Matches the exact section ordering of the original build_system_prompt()
         in runner.py for behavioral compatibility.
+
+        When workspace_branch and workspace_code_dir are provided, the quality
+        gates section is replaced with workspace-aware validation gates.
         """
-        parts = list(self.get_sections(agent_config, task_context))
+        parts = list(
+            self.get_sections(
+                agent_config,
+                task_context,
+                workspace_branch=workspace_branch,
+                workspace_code_dir=workspace_code_dir,
+            )
+        )
         return "\n\n---\n\n".join(content for _name, content in parts)
 
-    def get_sections(self, agent_config: AgentConfig, task_context: str | None = None) -> Iterator[tuple[str, str]]:
+    def get_sections(
+        self,
+        agent_config: AgentConfig,
+        task_context: str | None = None,
+        *,
+        workspace_branch: str | None = None,
+        workspace_code_dir: str | None = None,
+    ) -> Iterator[tuple[str, str]]:
         """Yield ordered (section_name, content) pairs for the system prompt.
 
         This is the canonical ordering:
@@ -210,15 +234,26 @@ class PromptComposer:
                     ),
                 )
 
-        # 10. Quality gates (builder agents only)
+        # 10. Quality gates / workspace validation (builder agents only)
         if self.should_include_section("quality_gates", agent_config):
-            yield (
-                "quality_gates",
-                self.render_template(
-                    "quality_gates.jinja2",
-                    company_root=cfg.company_root,
-                ),
-            )
+            if workspace_branch and workspace_code_dir and cfg.project_validate_commands:
+                yield (
+                    "quality_gates",
+                    self.render_template(
+                        "workspace_gates.jinja2",
+                        branch_name=workspace_branch,
+                        code_dir=workspace_code_dir,
+                        validate_commands=cfg.project_validate_commands,
+                    ),
+                )
+            else:
+                yield (
+                    "quality_gates",
+                    self.render_template(
+                        "quality_gates.jinja2",
+                        company_root=cfg.company_root,
+                    ),
+                )
 
         # 11. Task context
         if task_context:
