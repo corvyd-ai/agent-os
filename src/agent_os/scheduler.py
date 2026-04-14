@@ -425,6 +425,17 @@ async def tick(*, config: Config | None = None) -> TickResult:
             record.result = f"error: {e}"
         result.dispatched.append(record)
 
+    # Digest
+    if cfg.schedule_digest_enabled and _is_time_match(cfg.schedule_digest_time, config=cfg):
+        record = DispatchRecord(type="digest", agent="system", at=now_iso)
+        try:
+            get_logger("system").info("tick_dispatch", "Running daily digest", {"type": "digest"})
+            maintenance.run_daily_digest(config=cfg)
+            record.result = "done"
+        except Exception as e:
+            record.result = f"error: {e}"
+        result.dispatched.append(record)
+
     # 5. Write state
     write_scheduler_state(result, config=cfg)
     return result

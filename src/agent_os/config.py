@@ -125,6 +125,23 @@ class Config:
     schedule_watchdog_alert_threshold_minutes: int = 45
     schedule_watchdog_alert_hook: str = ""
 
+    # Digest
+    schedule_digest_enabled: bool = True
+    schedule_digest_time: str = "08:00"
+
+    # --- Notifications ---
+    notifications_enabled: bool = True
+    notifications_desktop: bool = False  # opt-in (noisy if unintended)
+    notifications_webhook_url: str = ""  # empty = disabled
+    notifications_script: str = ""  # path to notification script
+    notifications_file: bool = True  # always-on file-drop (default)
+    notifications_min_severity: str = "warning"  # info, warning, critical
+
+    # --- Failure circuit breaker ---
+    circuit_breaker_enabled: bool = True
+    circuit_breaker_max_failures: int = 5
+    circuit_breaker_cooldown_minutes: int = 60
+
     # --- Project (SDLC) ---
     project_repo_path: str = "."  # relative to company_root, or absolute
     project_default_branch: str = "main"
@@ -304,6 +321,35 @@ class Config:
             kwargs["schedule_watchdog_alert_threshold_minutes"] = int(watchdog["alert_threshold_minutes"])
         if "alert_hook" in watchdog:
             kwargs["schedule_watchdog_alert_hook"] = watchdog["alert_hook"]
+        digest = maint.get("digest", {})
+        if "enabled" in digest:
+            kwargs["schedule_digest_enabled"] = bool(digest["enabled"])
+        if "time" in digest:
+            kwargs["schedule_digest_time"] = digest["time"]
+
+        # [notifications]
+        notif = data.get("notifications", {})
+        if "enabled" in notif:
+            kwargs["notifications_enabled"] = bool(notif["enabled"])
+        if "desktop" in notif:
+            kwargs["notifications_desktop"] = bool(notif["desktop"])
+        if "webhook_url" in notif:
+            kwargs["notifications_webhook_url"] = notif["webhook_url"]
+        if "script" in notif:
+            kwargs["notifications_script"] = notif["script"]
+        if "file" in notif:
+            kwargs["notifications_file"] = bool(notif["file"])
+        if "min_severity" in notif:
+            kwargs["notifications_min_severity"] = notif["min_severity"]
+
+        # [circuit_breaker]
+        cb = data.get("circuit_breaker", {})
+        if "enabled" in cb:
+            kwargs["circuit_breaker_enabled"] = bool(cb["enabled"])
+        if "max_failures" in cb:
+            kwargs["circuit_breaker_max_failures"] = int(cb["max_failures"])
+        if "cooldown_minutes" in cb:
+            kwargs["circuit_breaker_cooldown_minutes"] = int(cb["cooldown_minutes"])
 
         # [roles]
         roles = data.get("roles", {})
