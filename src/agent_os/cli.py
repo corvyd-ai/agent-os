@@ -627,6 +627,43 @@ def cmd_watchdog(args):
         print("All agents healthy.")
 
 
+# --- doctor command ---
+
+
+def cmd_doctor(args):
+    """Run diagnostic health checks."""
+    _set_root(args)
+    from .doctor import format_doctor_output, run_doctor
+
+    verbose = getattr(args, "verbose", False)
+    result = run_doctor(verbose=verbose)
+    no_color = getattr(args, "no_color", False)
+    print(format_doctor_output(result, no_color=no_color, verbose=verbose))
+    sys.exit(1 if result.errors else 0)
+
+
+# --- digest command ---
+
+
+def cmd_digest(args):
+    """Generate a health digest."""
+    _set_root(args)
+    from .maintenance import run_daily_digest
+
+    result = run_daily_digest()
+    print(f"Tasks: {result.tasks_completed} completed, {result.tasks_failed} failed, {result.tasks_created} created")
+    print(f"Agents: {result.agents_healthy} healthy, {result.agents_stale} stale")
+    if result.breakers_tripped:
+        print(f"Breakers tripped: {', '.join(result.breakers_tripped)}")
+    print(f"Spend: ${result.daily_spend:.2f} / ${result.daily_cap:.2f}")
+    if result.anomalies:
+        print("\nAnomalies:")
+        for a in result.anomalies:
+            print(f"  ! {a}")
+    if result.digest_path:
+        print(f"\nDigest written to: {result.digest_path}")
+
+
 # --- cron command ---
 
 _CRON_MARKER = "# agent-os-tick"
@@ -900,6 +937,18 @@ def main():
     p_watchdog = subparsers.add_parser("watchdog", help="Check agent liveness")
     _add_common_args(p_watchdog)
     p_watchdog.set_defaults(func=cmd_watchdog)
+
+    # doctor
+    p_doctor = subparsers.add_parser("doctor", help="Diagnose system health issues")
+    p_doctor.add_argument("--verbose", "-v", action="store_true", help="Show all checks, not just failures")
+    p_doctor.add_argument("--no-color", action="store_true", help="Disable color output")
+    _add_common_args(p_doctor)
+    p_doctor.set_defaults(func=cmd_doctor)
+
+    # digest
+    p_digest = subparsers.add_parser("digest", help="Generate health digest")
+    _add_common_args(p_digest)
+    p_digest.set_defaults(func=cmd_digest)
 
     # update
     p_update = subparsers.add_parser("update", help="Self-update agent-os from git")

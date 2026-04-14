@@ -430,6 +430,36 @@ async def run_agent(
     if not _check_budget_gate(agent_id, "task", config=cfg):
         return
 
+    # Pre-flight health gate: verify agent can write to its directories
+    from .preflight import run_preflight
+
+    preflight = run_preflight(agent_id, config=cfg)
+    if not preflight.passed:
+        log = get_logger(agent_id, config=cfg)
+        log.error(
+            "preflight_failed",
+            f"Pre-flight checks failed: {preflight.summary}",
+            {
+                "checks": [
+                    {"name": c.name, "detail": c.detail, "fix": c.fix_suggestion} for c in preflight.failed_checks
+                ],
+            },
+        )
+        from .notifications import NotificationEvent, send_notification
+
+        send_notification(
+            NotificationEvent(
+                event_type="preflight_failed",
+                severity="critical",
+                title=f"Agent {agent_id} blocked by pre-flight check",
+                detail=preflight.summary,
+                agent_id=agent_id,
+                refs={"failed_checks": len(preflight.failed_checks)},
+            ),
+            config=cfg,
+        )
+        return
+
     composer = PromptComposer(config=cfg)
 
     agent_config = load_agent(agent_id, config=cfg)
@@ -542,11 +572,17 @@ async def _run_agent_standard(
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_text, task=task_id)
         log.error("sdk_error", error_detail, {**error_refs, "task": task_id})
         aios.fail_task(task_id, error_detail, error_refs=error_refs, config=cfg)
+        from .circuit_breaker import evaluate_breaker
+
+        evaluate_breaker(agent_config.agent_id, config=cfg)
         sys.exit(1)
     except Exception as e:
         error_detail = f"Pre-flight error: {e}"
         log.error("preflight_error", error_detail, {"task": task_id})
         aios.fail_task(task_id, error_detail, config=cfg)
+        from .circuit_breaker import evaluate_breaker
+
+        evaluate_breaker(agent_config.agent_id, config=cfg)
         sys.exit(1)
 
     if result_msg:
@@ -788,12 +824,18 @@ async def _run_agent_with_workspace(
         aios.fail_task(task_id, f"Workspace error: {e}", config=cfg)
         if workspace:
             cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        from .circuit_breaker import evaluate_breaker
+
+        evaluate_breaker(agent_config.agent_id, config=cfg)
     except RuntimeError as e:
         error_detail = str(e)
         log.error("sdk_error", error_detail, {"task_id": task_id})
         aios.fail_task(task_id, error_detail, config=cfg)
         if workspace:
             cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        from .circuit_breaker import evaluate_breaker
+
+        evaluate_breaker(agent_config.agent_id, config=cfg)
         sys.exit(1)
     except Exception as e:
         error_detail = f"Workspace task error: {e}"
@@ -801,6 +843,9 @@ async def _run_agent_with_workspace(
         aios.fail_task(task_id, error_detail, config=cfg)
         if workspace:
             cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        from .circuit_breaker import evaluate_breaker
+
+        evaluate_breaker(agent_config.agent_id, config=cfg)
         sys.exit(1)
 
 
@@ -1261,6 +1306,52 @@ async def run_cycle(
     cfg = config or get_config()
 
     if not _check_budget_gate(agent_id, "cycle", config=cfg):
+        return
+
+    # Pre-flight health gate: verify agent can write to its directories
+    from .preflight import run_preflight
+
+    preflight = run_preflight(agent_id, config=cfg)
+    if not preflight.passed:
+        log = get_logger(agent_id, config=cfg)
+        log.error(
+            "preflight_failed",
+            f"Pre-flight checks failed: {preflight.summary}",
+            {
+                "checks": [
+                    {"name": c.name, "detail": c.detail, "fix": c.fix_suggestion} for c in preflight.failed_checks
+                ],
+            },
+        )
+        from .notifications import NotificationEvent, send_notification
+
+        send_notification(
+            NotificationEvent(
+                event_type="preflight_failed",
+                severity="critical",
+                title=f"Agent {agent_id} blocked by pre-flight check",
+                detail=preflight.summary,
+                agent_id=agent_id,
+                refs={"failed_checks": len(preflight.failed_checks)},
+            ),
+            config=cfg,
+        )
+        return
+
+    # Failure circuit breaker: stop dispatching if too many consecutive failures
+    from .circuit_breaker import auto_check_reset, check_breaker
+
+    breaker = check_breaker(agent_id, config=cfg)
+    if breaker.tripped and not auto_check_reset(agent_id, config=cfg):
+        log = get_logger(agent_id, config=cfg)
+        log.warn(
+            "circuit_breaker_active",
+            f"Failure circuit breaker active: {breaker.reason}",
+            {
+                "tripped_at": breaker.tripped_at,
+                "consecutive_failures": breaker.consecutive_failures,
+            },
+        )
         return
 
     agent_config = load_agent(agent_id, config=cfg)

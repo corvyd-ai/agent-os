@@ -270,4 +270,207 @@ def run_watchdog(*, config: Config | None = None) -> WatchdogResult:
             except (subprocess.TimeoutExpired, OSError):
                 pass
 
+    # Also send via notification system (in addition to legacy hook)
+    if result.alerts:
+        from .notifications import NotificationEvent, send_notification
+
+        alert_text = "\n".join(f"- {a}" for a in result.alerts)
+        send_notification(
+            NotificationEvent(
+                event_type="watchdog_alert",
+                severity="warning",
+                title=f"Watchdog: {result.agents_stale} stale agent(s)",
+                detail=f"Stale agents detected:\n{alert_text}",
+                refs={"agents_stale": result.agents_stale, "agents_healthy": result.agents_healthy},
+            ),
+            config=cfg,
+        )
+
     return result
+
+
+# --- Daily digest ---
+
+
+@dataclass
+class DigestResult:
+    """Result of a daily health digest."""
+
+    tasks_completed: int = 0
+    tasks_failed: int = 0
+    tasks_created: int = 0
+    agents_healthy: int = 0
+    agents_stale: int = 0
+    breakers_tripped: list[str] = field(default_factory=list)
+    daily_spend: float = 0.0
+    daily_cap: float = 0.0
+    anomalies: list[str] = field(default_factory=list)
+    digest_path: str = ""
+
+
+def run_daily_digest(*, config: Config | None = None) -> DigestResult:
+    """Compute daily health summary from logs, costs, and task state.
+
+    Writes a markdown digest to ``operations/digests/YYYY-MM-DD.md``
+    and sends it via the notification system.
+    """
+    cfg = config or get_config()
+    result = DigestResult()
+    today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
+
+    # --- Task counts from today's files ---
+    result.tasks_completed = _count_dir_modified_today(cfg.tasks_dir / "done", today)
+    result.tasks_failed = _count_dir_modified_today(cfg.tasks_dir / "failed", today)
+    result.tasks_created = _count_dir_modified_today(cfg.tasks_dir / "queued", today) + _count_dir_modified_today(
+        cfg.tasks_dir / "backlog", today
+    )
+
+    # --- Agent health (reuse watchdog logic) ---
+    watchdog = run_watchdog(config=cfg)
+    result.agents_healthy = watchdog.agents_healthy
+    result.agents_stale = watchdog.agents_stale
+
+    # --- Circuit breakers ---
+    from .circuit_breaker import check_breaker
+    from .registry import list_agents
+
+    for agent in list_agents(config=cfg):
+        state = check_breaker(agent.agent_id, config=cfg)
+        if state.tripped:
+            result.breakers_tripped.append(agent.agent_id)
+
+    # --- Budget ---
+    from .budget import check_budget
+
+    budget = check_budget(config=cfg)
+    result.daily_spend = budget.daily_spent
+    result.daily_cap = budget.daily_cap
+
+    # --- Anomaly detection ---
+    result.anomalies = _detect_anomalies(cfg, today)
+
+    # --- Write digest file ---
+    digest_dir = cfg.operations_dir / "digests"
+    digest_dir.mkdir(parents=True, exist_ok=True)
+    digest_path = digest_dir / f"{today}.md"
+
+    lines = [
+        f"# Daily Digest — {today}",
+        "",
+        "## Tasks",
+        f"- Completed: {result.tasks_completed}",
+        f"- Failed: {result.tasks_failed}",
+        f"- Created: {result.tasks_created}",
+        "",
+        "## Agents",
+        f"- Healthy: {result.agents_healthy}",
+        f"- Stale: {result.agents_stale}",
+    ]
+    if result.breakers_tripped:
+        lines.append(f"- Circuit breakers tripped: {', '.join(result.breakers_tripped)}")
+
+    lines.extend(
+        [
+            "",
+            "## Budget",
+            f"- Daily spend: ${result.daily_spend:.2f} / ${result.daily_cap:.2f}",
+        ]
+    )
+
+    if result.anomalies:
+        lines.extend(["", "## Anomalies"])
+        for a in result.anomalies:
+            lines.append(f"- {a}")
+
+    digest_path.write_text("\n".join(lines) + "\n")
+    result.digest_path = str(digest_path)
+
+    # --- Send notification ---
+    from .notifications import NotificationEvent, send_notification
+
+    summary_parts = [
+        f"Tasks: {result.tasks_completed} done, {result.tasks_failed} failed",
+        f"Agents: {result.agents_healthy} healthy, {result.agents_stale} stale",
+        f"Budget: ${result.daily_spend:.2f} / ${result.daily_cap:.2f}",
+    ]
+    if result.anomalies:
+        summary_parts.append(f"Anomalies: {len(result.anomalies)}")
+
+    send_notification(
+        NotificationEvent(
+            event_type="daily_digest",
+            severity="info",
+            title=f"Daily digest — {today}",
+            detail="\n".join(summary_parts),
+            refs={
+                "tasks_completed": result.tasks_completed,
+                "tasks_failed": result.tasks_failed,
+                "agents_healthy": result.agents_healthy,
+                "agents_stale": result.agents_stale,
+            },
+        ),
+        config=cfg,
+    )
+
+    return result
+
+
+def _count_dir_modified_today(directory: Path, today: str) -> int:
+    """Count files in a directory modified today (by date in filename or mtime)."""
+    if not directory.exists():
+        return 0
+    count = 0
+    for f in directory.glob("*.md"):
+        # Check if filename contains today's date
+        if today.replace("-", "") in f.stem or today in f.stem:
+            count += 1
+            continue
+        # Fall back to mtime
+        try:
+            mtime = datetime.fromtimestamp(f.stat().st_mtime)
+            if mtime.strftime("%Y-%m-%d") == today:
+                count += 1
+        except OSError:
+            continue
+    return count
+
+
+def _detect_anomalies(cfg: Config, today: str) -> list[str]:
+    """Lightweight anomaly detection from today's logs."""
+    anomalies: list[str] = []
+
+    if not cfg.logs_dir.exists():
+        return anomalies
+
+    for agent_dir in sorted(cfg.logs_dir.iterdir()):
+        if not agent_dir.is_dir() or agent_dir.name == "system":
+            continue
+
+        agent_id = agent_dir.name
+        log_file = agent_dir / f"{today}.jsonl"
+        if not log_file.exists():
+            anomalies.append(f"{agent_id}: zero activity today")
+            continue
+
+        # Count errors and look for repeated patterns
+        error_counts: dict[str, int] = {}
+        try:
+            for line in log_file.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    if entry.get("level") == "error":
+                        action = entry.get("action", "unknown")
+                        error_counts[action] = error_counts.get(action, 0) + 1
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            continue
+
+        for action, count in error_counts.items():
+            if count >= 5:
+                anomalies.append(f"{agent_id}: {action} occurred {count} times")
+
+    return anomalies

@@ -267,6 +267,14 @@ def format_status(*, no_color: bool = False, config: Config | None = None) -> tu
     if in_review:
         attention.append(f"{in_review} task{'s' if in_review != 1 else ''} awaiting review")
 
+    # Failure circuit breakers
+    from .circuit_breaker import check_breaker
+
+    for agent in agents:
+        breaker = check_breaker(agent.agent_id, config=cfg)
+        if breaker.tripped:
+            attention.append(f"Failure circuit breaker tripped for {agent.name}: {breaker.reason}")
+
     # Budget warnings
     if budget.circuit_breaker_tripped:
         attention.append("Budget circuit breaker tripped")
