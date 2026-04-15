@@ -123,10 +123,12 @@ class TestSendNotification:
         event = _make_event(severity="warning")
         send_notification(event, config=cfg)
 
-        # Check system log was written
+        # Check system log was written — use cfg.tz to match the logger's
+        # timezone (otherwise this flakes across midnight boundaries when
+        # local time and cfg.tz disagree on the date).
         from datetime import datetime
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
         log_file = cfg.logs_dir / "system" / f"{today}.jsonl"
         assert log_file.exists()
         lines = log_file.read_text().strip().splitlines()

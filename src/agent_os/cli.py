@@ -636,7 +636,8 @@ def cmd_doctor(args):
     from .doctor import format_doctor_output, run_doctor
 
     verbose = getattr(args, "verbose", False)
-    result = run_doctor(verbose=verbose)
+    runtime_user = getattr(args, "runtime_user", None)
+    result = run_doctor(verbose=verbose, runtime_user=runtime_user)
     no_color = getattr(args, "no_color", False)
     print(format_doctor_output(result, no_color=no_color, verbose=verbose))
     sys.exit(1 if result.errors else 0)
@@ -942,6 +943,11 @@ def main():
     p_doctor = subparsers.add_parser("doctor", help="Diagnose system health issues")
     p_doctor.add_argument("--verbose", "-v", action="store_true", help="Show all checks, not just failures")
     p_doctor.add_argument("--no-color", action="store_true", help="Disable color output")
+    p_doctor.add_argument(
+        "--runtime-user",
+        default=None,
+        help="User account the scheduler runs as (for ownership check). Overrides config runtime_user.",
+    )
     _add_common_args(p_doctor)
     p_doctor.set_defaults(func=cmd_doctor)
 

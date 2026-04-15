@@ -10,6 +10,7 @@ from agent_os.doctor import (
     _check_file_permissions,
     _check_task_consistency,
     _check_write_probes,
+    _resolve_runtime_user,
     format_doctor_output,
     run_doctor,
 )
@@ -80,15 +81,95 @@ class TestCheckTaskConsistency:
 
 
 class TestCheckApiKey:
-    def test_key_present(self, monkeypatch):
+    def test_key_present_in_environ(self, aios_config, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        result = _check_api_key()
+        result = _check_api_key(aios_config)
+        assert result.status == "ok"
+        assert "environment" in result.detail
+
+    def test_key_missing(self, aios_config, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        result = _check_api_key(aios_config)
+        assert result.status == "error"
+
+    def test_key_found_in_dotenv(self, aios_config, monkeypatch):
+        """When shell env lacks the key, doctor should fall back to .env."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        (aios_config.company_root / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-from-env-file\n")
+        result = _check_api_key(aios_config)
+        assert result.status == "ok"
+        assert ".env" in result.detail
+
+    def test_key_found_in_runtime_env_file(self, aios_config, monkeypatch):
+        """Configured runtime_env_file (e.g., systemd EnvironmentFile)."""
+        from agent_os.config import Config
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        env_file = aios_config.company_root / "agent-os.env"
+        env_file.write_text("ANTHROPIC_API_KEY=sk-ant-systemd\n")
+        cfg = Config(
+            company_root=aios_config.company_root,
+            runtime_env_file="agent-os.env",
+        )
+        result = _check_api_key(cfg)
+        assert result.status == "ok"
+        assert "agent-os.env" in result.detail
+
+    def test_key_found_in_systemd_environment_line(self, aios_config, monkeypatch):
+        """systemd-style `Environment="KEY=value"` should also be detected."""
+        from agent_os.config import Config
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        env_file = aios_config.company_root / "agent-os.env"
+        env_file.write_text('Environment="ANTHROPIC_API_KEY=sk-ant-systemd"\n')
+        cfg = Config(
+            company_root=aios_config.company_root,
+            runtime_env_file="agent-os.env",
+        )
+        result = _check_api_key(cfg)
         assert result.status == "ok"
 
-    def test_key_missing(self, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        result = _check_api_key()
-        assert result.status == "error"
+
+class TestResolveRuntimeUser:
+    def test_defaults_to_invoking_user(self, aios_config):
+        _name, uid, source = _resolve_runtime_user(aios_config)
+        assert uid == os.getuid()
+        assert source == "invoking user"
+
+    def test_override_argument_wins(self, aios_config):
+        # Use a nonexistent user — we still want the name returned, with uid=None
+        name, uid, source = _resolve_runtime_user(aios_config, override="definitely-not-a-real-user-xyz")
+        assert name == "definitely-not-a-real-user-xyz"
+        assert uid is None
+        assert source == "--runtime-user"
+
+    def test_config_runtime_user(self, aios_config):
+        from agent_os.config import Config
+
+        cfg = Config(
+            company_root=aios_config.company_root,
+            runtime_user="definitely-not-a-real-user-xyz",
+        )
+        name, uid, source = _resolve_runtime_user(cfg)
+        assert name == "definitely-not-a-real-user-xyz"
+        assert uid is None
+        assert source == "config runtime_user"
+
+
+class TestCheckFilePermissionsWithRuntimeUser:
+    def test_unknown_runtime_user_does_not_error(self, aios_config):
+        """An unresolvable runtime user should degrade to a warning, not
+        fail the whole check (which would block healthy systems)."""
+        result = _check_file_permissions(aios_config, runtime_user_override="no-such-user-xyz")
+        assert result.status == "warning"
+        assert "does not exist" in result.detail
+
+    def test_matching_uid_passes(self, aios_config):
+        """Files owned by the invoking user should pass when no runtime_user
+        is set (invoking user is the default)."""
+        (aios_config.tasks_queued / "task-001.md").write_text("test")
+        result = _check_file_permissions(aios_config)
+        assert result.status == "ok"
 
 
 class TestCheckConfig:

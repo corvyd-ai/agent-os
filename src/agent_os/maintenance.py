@@ -319,10 +319,10 @@ def run_daily_digest(*, config: Config | None = None) -> DigestResult:
     today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
 
     # --- Task counts from today's files ---
-    result.tasks_completed = _count_dir_modified_today(cfg.tasks_dir / "done", today)
-    result.tasks_failed = _count_dir_modified_today(cfg.tasks_dir / "failed", today)
-    result.tasks_created = _count_dir_modified_today(cfg.tasks_dir / "queued", today) + _count_dir_modified_today(
-        cfg.tasks_dir / "backlog", today
+    result.tasks_completed = _count_dir_modified_today(cfg.tasks_dir / "done", today, cfg)
+    result.tasks_failed = _count_dir_modified_today(cfg.tasks_dir / "failed", today, cfg)
+    result.tasks_created = _count_dir_modified_today(cfg.tasks_dir / "queued", today, cfg) + _count_dir_modified_today(
+        cfg.tasks_dir / "backlog", today, cfg
     )
 
     # --- Agent health (reuse watchdog logic) ---
@@ -415,8 +415,13 @@ def run_daily_digest(*, config: Config | None = None) -> DigestResult:
     return result
 
 
-def _count_dir_modified_today(directory: Path, today: str) -> int:
-    """Count files in a directory modified today (by date in filename or mtime)."""
+def _count_dir_modified_today(directory: Path, today: str, cfg: Config) -> int:
+    """Count files in a directory modified today (by date in filename or mtime).
+
+    Mtime is interpreted in ``cfg.tz`` to match how ``today`` was computed —
+    otherwise this flakes across midnight when local time and the configured
+    timezone disagree on the date.
+    """
     if not directory.exists():
         return 0
     count = 0
@@ -425,9 +430,9 @@ def _count_dir_modified_today(directory: Path, today: str) -> int:
         if today.replace("-", "") in f.stem or today in f.stem:
             count += 1
             continue
-        # Fall back to mtime
+        # Fall back to mtime, in the configured timezone
         try:
-            mtime = datetime.fromtimestamp(f.stat().st_mtime)
+            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=cfg.tz)
             if mtime.strftime("%Y-%m-%d") == today:
                 count += 1
         except OSError:

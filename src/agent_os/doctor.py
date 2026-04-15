@@ -18,10 +18,12 @@ Programmatic:
 from __future__ import annotations
 
 import os
+import pwd
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from .config import Config, get_config
 
@@ -102,9 +104,56 @@ def _check_directory_structure(cfg: Config) -> DiagnosticCheck:
     )
 
 
-def _check_file_permissions(cfg: Config) -> DiagnosticCheck:
-    """Check ownership consistency across agent directories."""
-    current_uid = os.getuid()
+def _resolve_runtime_user(cfg: Config, override: str | None = None) -> tuple[str, int | None, str]:
+    """Resolve the runtime user to a (name, uid, source) triple.
+
+    Resolution order:
+      1. ``override`` argument (e.g., from --runtime-user flag)
+      2. ``cfg.runtime_user`` (from TOML)
+      3. The invoking user (``os.getuid()``)
+
+    ``uid`` may be None if a username was configured but doesn't resolve
+    on this host — in that case the caller should degrade gracefully.
+    The ``source`` string indicates where the value came from, for display.
+    """
+    if override:
+        try:
+            return override, pwd.getpwnam(override).pw_uid, "--runtime-user"
+        except KeyError:
+            return override, None, "--runtime-user"
+    if cfg.runtime_user:
+        try:
+            return cfg.runtime_user, pwd.getpwnam(cfg.runtime_user).pw_uid, "config runtime_user"
+        except KeyError:
+            return cfg.runtime_user, None, "config runtime_user"
+    uid = os.getuid()
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        name = str(uid)
+    return name, uid, "invoking user"
+
+
+def _check_file_permissions(cfg: Config, runtime_user_override: str | None = None) -> DiagnosticCheck:
+    """Check ownership consistency across agent directories.
+
+    Uses the configured runtime user when set (the account the scheduler
+    runs as in production), falling back to the invoking user only if
+    nothing is configured. This avoids the foot-gun where ``agent-os doctor``
+    run by a human as root on a systemd deployment reports every
+    service-owned file as "wrong" and recommends chowning everything to
+    root — which would immediately re-break the scheduler.
+    """
+    user_name, user_uid, source = _resolve_runtime_user(cfg, runtime_user_override)
+
+    if user_uid is None:
+        return DiagnosticCheck(
+            name="File permissions",
+            status="warning",
+            detail=f"Runtime user {user_name!r} ({source}) does not exist on this host — skipping ownership check",
+            fix='Set [runtime] user = "<actual-service-account>" in agent-os.toml',
+        )
+
     mismatched: list[tuple[str, int]] = []
 
     dirs_to_check = [
@@ -124,7 +173,7 @@ def _check_file_permissions(cfg: Config) -> DiagnosticCheck:
             for item in d.rglob("*"):
                 try:
                     st = item.stat()
-                    if st.st_uid != current_uid:
+                    if st.st_uid != user_uid:
                         rel = item.relative_to(cfg.company_root)
                         mismatched.append((str(rel), st.st_uid))
                 except OSError:
@@ -138,10 +187,14 @@ def _check_file_permissions(cfg: Config) -> DiagnosticCheck:
         return DiagnosticCheck(
             name="File permissions",
             status="error",
-            detail=f"{len(mismatched)} files with wrong ownership: {', '.join(examples)}{extra}",
-            fix=f"sudo chown -R {current_uid} {cfg.company_root}",
+            detail=f"{len(mismatched)} files not owned by runtime user {user_name!r} (uid {user_uid}, from {source}): {', '.join(examples)}{extra}",
+            fix=f"sudo chown -R {user_name} {cfg.company_root}",
         )
-    return DiagnosticCheck(name="File permissions", status="ok", detail="All files owned by current user")
+    return DiagnosticCheck(
+        name="File permissions",
+        status="ok",
+        detail=f"All files owned by runtime user {user_name!r} (uid {user_uid}, from {source})",
+    )
 
 
 def _check_write_probes(cfg: Config) -> DiagnosticCheck:
@@ -253,36 +306,98 @@ def _check_circuit_breakers(cfg: Config) -> DiagnosticCheck:
     return DiagnosticCheck(name="Circuit breakers", status="ok", detail="No breakers tripped")
 
 
-def _check_api_key() -> DiagnosticCheck:
-    """Check that ANTHROPIC_API_KEY is configured."""
+def _env_file_has_key(path: Path, key: str) -> bool:
+    """Check if a KEY=... or KEY="..." line exists in an env-style file."""
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            # Handle `KEY=...`, `KEY =...`, and systemd's `Environment="KEY=..."` forms
+            if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                return True
+            if line.startswith(f'Environment="{key}=') or line.startswith(f"Environment='{key}="):
+                return True
+            if line.startswith(f"Environment={key}="):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _check_api_key(cfg: Config) -> DiagnosticCheck:
+    """Check that ANTHROPIC_API_KEY is configured somewhere the scheduler will see it.
+
+    Checks, in order:
+      1. os.environ (the invoking shell)
+      2. cfg.runtime_env_file if set (e.g., a systemd EnvironmentFile)
+      3. <company_root>/.env
+
+    A human SSHing in as root won't have the systemd env loaded, so
+    falling back to .env / the configured env_file avoids a false positive.
+    """
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return DiagnosticCheck(name="API key", status="ok", detail="ANTHROPIC_API_KEY is set")
+        return DiagnosticCheck(name="API key", status="ok", detail="ANTHROPIC_API_KEY set in environment")
+
+    candidates: list[Path] = []
+    if cfg.runtime_env_file:
+        env_path = Path(cfg.runtime_env_file)
+        if not env_path.is_absolute():
+            env_path = cfg.company_root / env_path
+        candidates.append(env_path)
+    candidates.append(cfg.company_root / ".env")
+
+    for candidate in candidates:
+        if candidate.exists() and _env_file_has_key(candidate, "ANTHROPIC_API_KEY"):
+            return DiagnosticCheck(
+                name="API key",
+                status="ok",
+                detail=f"ANTHROPIC_API_KEY found in {candidate}",
+            )
+
     return DiagnosticCheck(
         name="API key",
         status="error",
-        detail="ANTHROPIC_API_KEY not set",
-        fix="export ANTHROPIC_API_KEY=sk-ant-... (or add to .env file)",
+        detail="ANTHROPIC_API_KEY not found in environment, runtime_env_file, or .env",
+        fix="export ANTHROPIC_API_KEY=sk-ant-... (or add to .env, or set [runtime] env_file)",
     )
 
 
-def _check_cron(cfg: Config) -> DiagnosticCheck:
-    """Check if agent-os tick is in the crontab."""
+def _check_scheduler(cfg: Config) -> DiagnosticCheck:
+    """Check if the agent-os scheduler is installed (crontab or systemd timer).
+
+    Deployments may use either crontab (``agent-os cron install``) or a
+    systemd timer (common for service-account deployments). We consider
+    the check OK if either is present.
+    """
+    # Try crontab first
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and "agent-os" in result.stdout:
-            return DiagnosticCheck(name="Cron", status="ok", detail="agent-os found in crontab")
-        return DiagnosticCheck(
-            name="Cron",
-            status="warning",
-            detail="agent-os not found in crontab",
-            fix="agent-os cron install",
-        )
+            return DiagnosticCheck(name="Scheduler", status="ok", detail="agent-os found in crontab")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return DiagnosticCheck(
-            name="Cron",
-            status="warning",
-            detail="Could not check crontab",
-        )
+        pass
+
+    # Try systemd timers (user and system)
+    for systemctl_args in (["systemctl", "--user", "list-timers", "--all"], ["systemctl", "list-timers", "--all"]):
+        try:
+            result = subprocess.run(systemctl_args, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and "agent-os" in result.stdout.lower():
+                scope = "user" if "--user" in systemctl_args else "system"
+                return DiagnosticCheck(
+                    name="Scheduler",
+                    status="ok",
+                    detail=f"agent-os found in systemd timers ({scope} scope)",
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+
+    # Neither found — this is just a warning, not an error: the user may
+    # be driving the scheduler manually or via another mechanism.
+    return DiagnosticCheck(
+        name="Scheduler",
+        status="warning",
+        detail="agent-os not found in crontab or systemd timers",
+        fix="agent-os cron install  (or configure a systemd timer)",
+    )
 
 
 def _check_log_health(cfg: Config) -> DiagnosticCheck:
@@ -346,20 +461,30 @@ def _check_config(cfg: Config) -> DiagnosticCheck:
 # --- Main entry point ---
 
 
-def run_doctor(*, config: Config | None = None, verbose: bool = False) -> DoctorResult:
-    """Run all diagnostic checks and return the aggregated result."""
+def run_doctor(
+    *,
+    config: Config | None = None,
+    verbose: bool = False,
+    runtime_user: str | None = None,
+) -> DoctorResult:
+    """Run all diagnostic checks and return the aggregated result.
+
+    ``runtime_user`` (optional) overrides ``cfg.runtime_user`` — passed in
+    from the CLI's ``--runtime-user`` flag. Used by the ownership check to
+    compare files against the correct account on systemd deployments.
+    """
     cfg = config or get_config()
     result = DoctorResult()
 
     result.checks.append(_check_directory_structure(cfg))
-    result.checks.append(_check_file_permissions(cfg))
+    result.checks.append(_check_file_permissions(cfg, runtime_user))
     result.checks.append(_check_write_probes(cfg))
     result.checks.append(_check_config(cfg))
     result.checks.append(_check_agent_registry(cfg))
     result.checks.append(_check_task_consistency(cfg))
     result.checks.append(_check_circuit_breakers(cfg))
-    result.checks.append(_check_api_key())
-    result.checks.append(_check_cron(cfg))
+    result.checks.append(_check_api_key(cfg))
+    result.checks.append(_check_scheduler(cfg))
     result.checks.append(_check_log_health(cfg))
 
     return result

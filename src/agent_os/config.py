@@ -142,6 +142,19 @@ class Config:
     circuit_breaker_max_failures: int = 5
     circuit_breaker_cooldown_minutes: int = 60
 
+    # --- Runtime user (for systemd/service deployments) ---
+    # Username the scheduler runs as (e.g., "corvyd"). When set, tools like
+    # `agent-os doctor` compare file ownership against this user instead of
+    # the invoking user — useful when a human SSHes in as root to diagnose
+    # a service that actually runs as a different account.
+    # Empty = use the invoking user (the traditional default).
+    runtime_user: str = ""
+
+    # Path to an env file (e.g., systemd EnvironmentFile). Read by doctor to
+    # verify secrets like ANTHROPIC_API_KEY are configured even when the
+    # invoking shell doesn't have them loaded. Empty = only check os.environ.
+    runtime_env_file: str = ""
+
     # --- Project (SDLC) ---
     project_repo_path: str = "."  # relative to company_root, or absolute
     project_default_branch: str = "main"
@@ -350,6 +363,12 @@ class Config:
             kwargs["circuit_breaker_max_failures"] = int(cb["max_failures"])
         if "cooldown_minutes" in cb:
             kwargs["circuit_breaker_cooldown_minutes"] = int(cb["cooldown_minutes"])
+
+        # [runtime]  (user/env_file — keep alongside existing [runtime] keys)
+        if "user" in runtime:
+            kwargs["runtime_user"] = runtime["user"]
+        if "env_file" in runtime:
+            kwargs["runtime_env_file"] = runtime["env_file"]
 
         # [roles]
         roles = data.get("roles", {})
