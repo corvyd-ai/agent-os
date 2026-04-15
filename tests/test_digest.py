@@ -50,11 +50,13 @@ class TestRunDailyDigest:
             notifications_min_severity="info",
             log_also_print=False,
         )
-        # Create a done task with today's date in the name
-        today = datetime.now(cfg.tz).strftime("%Y-%m%d")
+        # A just-written file has today's mtime — that's what the counter
+        # falls back to when the filename doesn't contain the date. The
+        # filename is intentionally date-free so the test doesn't depend
+        # on filename-format-matching (which is brittle across tz rollover).
         done_dir = cfg.tasks_dir / "done"
         done_dir.mkdir(parents=True, exist_ok=True)
-        (done_dir / f"task-{today}-001.md").write_text("---\nstatus: done\n---\n")
+        (done_dir / "task-completed-today.md").write_text("---\nstatus: done\n---\n")
 
         result = run_daily_digest(config=cfg)
         assert result.tasks_completed == 1

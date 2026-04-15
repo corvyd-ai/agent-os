@@ -6,6 +6,12 @@ silent repeated failures (e.g., permission errors from root-owned files).
 Uses real write probes (create + delete temp file) instead of os.access()
 because the latter lies with NFS, ACLs, and SELinux.
 
+Scope: preflight runs every cycle, so it must be *capability* checks only
+(can I actually perform the operations I need?). Heuristic checks like
+"do files have the expected owner" belong in ``agent-os doctor``, where a
+human can evaluate the result — preflight blocking on a heuristic false
+positive produces the same silent-loop failure mode it's meant to prevent.
+
 Usage:
     from agent_os.preflight import run_preflight
 
@@ -18,7 +24,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -85,45 +90,15 @@ def _probe_writable(directory: Path) -> PreflightCheck:
         )
 
 
-def _check_ownership(directory: Path, label: str) -> PreflightCheck:
-    """Check that files in a directory are owned by the current user."""
-    name = f"ownership_{label}"
-    current_uid = os.getuid()
-
-    if not directory.exists():
-        return PreflightCheck(name=name, passed=True)
-
-    mismatched: list[str] = []
-    try:
-        for item in directory.iterdir():
-            try:
-                stat = item.stat()
-                if stat.st_uid != current_uid:
-                    mismatched.append(f"{item.name} (uid {stat.st_uid})")
-            except OSError:
-                continue
-    except OSError:
-        return PreflightCheck(name=name, passed=True)
-
-    if mismatched:
-        files_str = ", ".join(mismatched[:5])
-        extra = f" (+{len(mismatched) - 5} more)" if len(mismatched) > 5 else ""
-        return PreflightCheck(
-            name=name,
-            passed=False,
-            detail=f"Ownership mismatch in {directory}: {files_str}{extra}",
-            fix_suggestion=f"sudo chown -R {current_uid} {directory}",
-        )
-
-    return PreflightCheck(name=name, passed=True)
-
-
 def run_preflight(agent_id: str, *, config: Config | None = None) -> PreflightResult:
     """Run all pre-flight checks for an agent.
 
-    Validates that the agent can write to its operational directories and
-    that file ownership is consistent. Returns a PreflightResult with
-    individual check details.
+    Validates via *capability* probes that the agent can write to its
+    operational directories. Heuristic checks (e.g., file ownership) are
+    deliberately excluded — they belong in ``agent-os doctor`` where a
+    human can evaluate the result. A per-cycle heuristic that misfires
+    silently blocks the scheduler, the exact failure mode preflight exists
+    to prevent.
     """
     cfg = config or get_config()
     result = PreflightResult()
@@ -141,15 +116,5 @@ def run_preflight(agent_id: str, *, config: Config | None = None) -> PreflightRe
 
     for d in write_dirs:
         result.checks.append(_probe_writable(d))
-
-    # Ownership checks on task directories (where the incident happened)
-    ownership_dirs = [
-        ("tasks_queued", cfg.tasks_queued),
-        ("tasks_in_progress", cfg.tasks_in_progress),
-        ("agent_state", cfg.agents_state_dir / agent_id),
-    ]
-
-    for label, d in ownership_dirs:
-        result.checks.append(_check_ownership(d, label))
 
     return result

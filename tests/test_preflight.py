@@ -2,7 +2,7 @@
 
 import os
 
-from agent_os.preflight import _check_ownership, _probe_writable, run_preflight
+from agent_os.preflight import _probe_writable, run_preflight
 
 
 class TestProbeWritable:
@@ -28,28 +28,6 @@ class TestProbeWritable:
         result = _probe_writable(d)
         assert result.passed is True
         assert d.is_dir()
-
-
-class TestCheckOwnership:
-    def test_all_owned_by_current_user(self, aios_config):
-        d = aios_config.tasks_queued
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "test-task.md").write_text("test")
-
-        result = _check_ownership(d, "tasks_queued")
-        assert result.passed is True
-
-    def test_empty_directory(self, aios_config):
-        d = aios_config.tasks_queued
-        d.mkdir(parents=True, exist_ok=True)
-
-        result = _check_ownership(d, "tasks_queued")
-        assert result.passed is True
-
-    def test_nonexistent_directory(self, aios_config):
-        d = aios_config.company_root / "does_not_exist"
-        result = _check_ownership(d, "nonexistent")
-        assert result.passed is True
 
 
 class TestRunPreflight:
@@ -84,7 +62,24 @@ class TestRunPreflight:
 
         os.chmod(d, 0o755)
 
-    def test_checks_multiple_directories(self, aios_config):
+    def test_checks_are_writability_only(self, aios_config):
+        """Preflight must be capability-only — no heuristic ownership checks
+        that could misfire and block the scheduler."""
         result = run_preflight("agent-001", config=aios_config)
-        # Should check write probes + ownership checks
-        assert len(result.checks) >= 7  # 7 write probes + 3 ownership checks
+        # Every check should be a write probe (name starts with "write_")
+        for check in result.checks:
+            assert check.name.startswith("write_"), (
+                f"Unexpected non-write-probe check {check.name!r} — heuristic checks belong in doctor, not preflight"
+            )
+
+    def test_does_not_flag_foreign_owned_files(self, aios_config):
+        """A file with a different uid must NOT cause preflight to fail, as
+        long as the directory itself is writable. This is the corvyd case:
+        the scheduler runs as the service account and must not be blocked
+        by ownership heuristics that misfire."""
+        # Create a normal file — we can't actually change its uid without
+        # root, but we verify the check doesn't even try to compare uids.
+        (aios_config.tasks_queued / "task-001.md").write_text("test")
+
+        result = run_preflight("agent-001", config=aios_config)
+        assert result.passed is True
