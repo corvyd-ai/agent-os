@@ -32,6 +32,13 @@ def test_init_dirs_includes_declined():
     assert "agents/tasks/declined" in INIT_DIRS
 
 
+def test_init_dirs_includes_knowledge_technical():
+    """INIT_DIRS list should include knowledge/technical — where the
+    release-notes module writes the platform reference doc and changelog.
+    Must exist from init so `agent-os update` can write there cleanly."""
+    assert "knowledge/technical" in INIT_DIRS
+
+
 def test_init_creates_agent_os_toml(tmp_path, monkeypatch):
     """agent-os init should create a valid agent-os.toml."""
     monkeypatch.chdir(tmp_path)
