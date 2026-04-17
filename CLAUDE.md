@@ -115,6 +115,7 @@ tests/            # pytest suite
 | `src/agent_os/composer.py` | `build_system_prompt()` — builds the 4-layer attention prompt (workspace-aware) |
 | `src/agent_os/core.py` | All file operations: `create_task()`, `create_task_human()`, `send_message()`, `post_broadcast()`, `next_id()`, `claim_task()`, `complete_task()` |
 | `src/agent_os/workspace.py` | Git worktree lifecycle: `create_workspace()`, `setup_workspace()`, `validate_workspace()`, `commit_workspace()`, `push_workspace()`, `cleanup_workspace()` |
+| `src/agent_os/release_notes.py` | `write_update_notes()` — called by `agent-os update`; regenerates `knowledge/technical/agent-os-platform.md`, appends to `platform-changelog.md`, and posts a broadcast. The reference doc template lives at `src/agent_os/resources/agent-os-platform.md.jinja2` — update it whenever a user-visible platform behavior changes. |
 
 ## Available Skills
 

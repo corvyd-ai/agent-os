@@ -46,6 +46,7 @@ INIT_DIRS = [
     "finance/costs",
     "products",
     "knowledge",
+    "knowledge/technical",
     "operations/scripts",
 ]
 
@@ -551,10 +552,19 @@ def cmd_update(args):
         print(f"Already up to date (v{__version__} on {branch}).")
         return
 
+    # Capture the pre-pull commit and subject lines — we'll use these to
+    # write release notes for agents after the install succeeds.
+    previous_commit = git("rev-parse", "HEAD").stdout.strip()
+    from . import __version__ as previous_version
+
     # Show what's new
     print(f"\n{new_commits} new commit(s):\n")
     git_log = git("log", f"HEAD..origin/{branch}", "--oneline", "--no-decorate")
     print(git_log.stdout.strip())
+
+    # Capture the subjects for the release notes broadcast
+    subjects_raw = git("log", f"HEAD..origin/{branch}", "--pretty=format:%s").stdout
+    commit_subjects = [s for s in subjects_raw.splitlines() if s.strip()]
 
     if not getattr(args, "yes", False):
         try:
@@ -573,6 +583,8 @@ def cmd_update(args):
         print(f"Error: git pull failed: {r.stderr.strip()}", file=sys.stderr)
         print("Your branch may have diverged. Resolve manually.", file=sys.stderr)
         sys.exit(1)
+
+    new_commit = git("rev-parse", "HEAD").stdout.strip()
 
     # Reinstall
     print("Reinstalling...")
@@ -594,6 +606,95 @@ def cmd_update(args):
     )
     new_version = r.stdout.strip() if r.returncode == 0 else "unknown"
     print(f"\nUpdated to v{new_version}.")
+
+    # Write release notes to the company's knowledge base so agents running
+    # on this deployment learn what changed. Skipped silently if no company
+    # config is reachable (e.g., running `agent-os update` from the platform
+    # repo without AGENT_OS_ROOT pointing at a company).
+    _write_release_notes_if_possible(
+        previous_commit=previous_commit,
+        new_commit=new_commit,
+        commit_subjects=commit_subjects,
+        previous_version=previous_version,
+        new_version=new_version,
+    )
+
+
+def _write_release_notes_if_possible(
+    *,
+    previous_commit: str,
+    new_commit: str,
+    commit_subjects: list[str],
+    previous_version: str,
+    new_version: str,
+) -> None:
+    """Best-effort write of agent-visible release notes to the company.
+
+    Runs in a subprocess against the freshly-installed package so it uses
+    the new code (not the old, still-loaded-in-memory release_notes module).
+    Failures are non-fatal — they print a warning but do not fail the
+    update itself, which has already succeeded by this point.
+    """
+    import json
+    import subprocess
+
+    payload = json.dumps(
+        {
+            "previous_commit": previous_commit,
+            "new_commit": new_commit,
+            "commit_subjects": commit_subjects,
+            "previous_version": previous_version,
+            "new_version": new_version,
+        }
+    )
+
+    # We call the freshly-installed package via a subprocess so the agent
+    # reading the release notes sees the new behaviors, not the behaviors
+    # from the pre-update module still loaded in this process.
+    script = (
+        "import json, sys;"
+        "from agent_os.release_notes import write_update_notes;"
+        "from agent_os.config import get_config;"
+        "data = json.loads(sys.argv[1]);"
+        "cfg = get_config();"
+        "r = write_update_notes("
+        "previous_commit=data['previous_commit'],"
+        "new_commit=data['new_commit'],"
+        "commit_subjects=data['commit_subjects'],"
+        "previous_version=data['previous_version'],"
+        "new_version=data['new_version'],"
+        "config=cfg);"
+        "print(json.dumps({'broadcast_id': r.broadcast_id, 'reference': r.reference_doc_path, 'changelog': r.changelog_path, 'errors': r.errors}))"
+    )
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, payload],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"Warning: could not write release notes: {e}", file=sys.stderr)
+        return
+
+    if result.returncode != 0:
+        # Most common cause: no company config reachable — silent skip is fine.
+        # But if stderr is non-empty, surface it as a warning.
+        if result.stderr.strip():
+            print(f"Warning: release notes step skipped: {result.stderr.strip()}", file=sys.stderr)
+        return
+
+    try:
+        out = json.loads(result.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return
+
+    if out.get("errors"):
+        for err in out["errors"]:
+            print(f"Warning: release notes: {err}", file=sys.stderr)
+    if out.get("broadcast_id"):
+        print(f"Release notes: posted broadcast {out['broadcast_id']} and regenerated platform reference doc.")
 
 
 # --- manifest command ---

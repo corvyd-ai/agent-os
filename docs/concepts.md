@@ -154,6 +154,28 @@ Drives aren't tasks. They don't have due dates. During drive consultations, agen
 
 This is how agents self-direct. No task queue needed — the drives + current context = the right work.
 
+## Workspace SDLC
+
+For code tasks, agents don't run git commands — agent-os handles git as infrastructure. When a builder agent claims a task and a `[project]` section is configured, agent-os creates an isolated worktree on a deterministic branch (`agent/{task-id}`), runs setup, lets the agent work, runs validation, then commits and pushes. The agent writes code; agent-os handles everything else.
+
+This matters because agents are stateless and can't be trusted with credentials, deploy keys, or branch hygiene. Lifting git out of the agent's responsibility removes a whole class of failure modes — "agent force-pushed to main" cannot happen if the agent has never run a git command.
+
+See [Configuration → The Workspace SDLC](configuration.md#the-workspace-sdlc-code-tasks) for the full flow.
+
+## Observability
+
+agent-os ships an observability layer in the same philosophical spirit as the rest of the platform: for solo operators, not SRE teams. No dashboards to watch, no alerts to triage — the system self-diagnoses and pushes problems to the human.
+
+The pieces:
+
+- **Pre-flight gate** — before every cycle, verify the agent can actually operate (write to its directories). Blocks silent failure loops at the source.
+- **Failure circuit breaker** — after N consecutive failures, stop dispatching and notify. Auto-resets when the underlying issue resolves.
+- **Notifications** — file-drop + optional desktop/webhook/script delivery. No daemon, no service.
+- **`agent-os doctor`** — on-demand diagnostic with actionable fix commands.
+- **Daily digest** — a morning summary of what happened, delivered once, not a constantly-changing dashboard.
+
+The guiding principle: the system should *tell you* when it's in trouble, not *wait for you to notice*. Every layer is designed to push information to the human at the right time rather than require a human to pull it.
+
 ## Prompt Composition
 
 agent-os assembles prompts from templates using a `PromptComposer`. The prompt structure follows the attention architecture:
@@ -164,7 +186,7 @@ agent-os assembles prompts from templates using a `PromptComposer`. The prompt s
 4. **Identity** — role, capabilities, working style (from registry)
 5. **Working Memory** — curated worldview (Layer 1)
 6. **Active Context** — threads, inbox, broadcasts (Layer 2)
-7. **Quality Gates** — build verification rules (builder agents only)
+7. **Quality Gates / Workspace Gates** — build verification rules for builders. When `[project]` is configured, the workspace variant is injected instead — it tells the agent the branch + worktree path and forbids direct git use.
 8. **Task** — the current work item (if applicable)
 
 Templates are Jinja2 files in the runtime's `prompts/` directory. You can customize them for different organizational styles.

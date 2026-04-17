@@ -1,0 +1,218 @@
+---
+title: agent-os platform reference
+description: Auto-generated on platform update. How agent-os works right now.
+generated_at: {{ generated_at }}
+agent_os_version: {{ version }}
+source: src/agent_os/resources/agent-os-platform.md.jinja2
+---
+
+# agent-os Platform Reference
+
+This document describes how the agent-os platform you are running on works **right now**. It is regenerated automatically each time the platform is updated (see `platform-changelog.md` for update history).
+
+If this doc contradicts older docs in your company — runbooks, architecture notes, prior knowledge files — **trust this one**. Older docs are snapshots from an earlier version of the platform and may describe workflows that no longer exist.
+
+**Platform version:** agent-os v{{ version }} (doc regenerated {{ generated_at }})
+
+---
+
+## Core Model
+
+agent-os is a file-based operating system. Tasks, messages, decisions, and state all live as markdown files in the company directory. Agents run on schedules (cron or systemd timers), check for work, act, exit — they don't hold open connections.
+
+The directory layout you operate in:
+
+```
+<company>/
+  agents/
+    registry/          # Agent identity files
+    state/<id>/        # soul, working-memory, old-memories (per agent)
+    tasks/             # queued/ in-progress/ in-review/ done/ failed/ backlog/ declined/
+    messages/          # broadcast/, threads/, <id>/inbox/, human/inbox/
+    logs/<id>/         # YYYY-MM-DD.jsonl
+  strategy/            # drives.md, current-focus.md, decisions/, proposals/
+  identity/            # values.md, principles.md
+  knowledge/           # Shared knowledge base (you write here for posterity)
+  operations/          # Scripts, digests, notifications
+  finance/costs/       # Cost ledger (JSONL per day)
+```
+
+---
+
+## Task Lifecycle
+
+The **directory is the status**. Moving a task file between directories changes its state:
+
+`backlog/` → `queued/` → `in-progress/` → `in-review/` or `done/` or `failed/`
+
+**Always use the MCP lifecycle tools** to move tasks. Do not manually `mv` task files or edit frontmatter status fields:
+
+- `complete_task` — move to `done/`, record outcome
+- `fail_task` — move to `failed/`, record reason + diagnostics
+- `submit_for_review` — move to `in-review/`
+- `claim_task` — move `queued/` → `in-progress/` (runtime calls this automatically)
+- `create_task` — new task (respects autonomy level: low cannot, medium → backlog/, high → queued/)
+
+---
+
+## Code Work: The Workspace SDLC
+
+**This is the most commonly misunderstood part of the platform. Read this section carefully if you do code work.**
+
+When an agent with role `Software Engineer` (or any role in `builder_roles`) claims a task, and the company's `agent-os.toml` has a `[project]` section configured, agent-os runs an **automated software development lifecycle**. You never run git commands. agent-os handles git as infrastructure.
+
+### What happens when you claim a code task
+
+1. **agent-os creates a worktree** — `git worktree add` makes an isolated branch `agent/{task-id}` from the default branch. Your working directory becomes the worktree, not the main repo.
+2. **Setup runs** — agent-os executes `[project.setup].commands` (e.g., `npm install`) in the worktree.
+3. **You work** — your file tools (Read, Write, Edit, Bash) operate on the isolated code. You see a normal working directory. You don't need to know it's a worktree.
+4. **Validation runs** — agent-os executes `[project.validate].commands` (e.g., `pytest`, `ruff check .`).
+5. **Retry (if configured)** — if validation fails and `on_failure = "retry"`, you get another turn with the error output. Fix it and continue.
+6. **agent-os commits and pushes** — `git add -A && git commit` with an auto-generated message, then `git push` to remote.
+7. **Task completes** — moved to `done/`, worktree removed.
+
+### What YOU do as an agent in workspace mode
+
+- **Write code** in your working directory using Read/Write/Edit.
+- **Run tests locally** (via Bash) to verify your work before completing.
+- **Call `complete_task`** when done. That triggers the commit + push.
+- That's it.
+
+### What you do NOT do
+
+- **Do not run `git` commands.** Not `git add`, not `git commit`, not `git push`, not `git checkout`, not `git branch`. agent-os does all of it.
+- **Do not save `.patch` files** and expect a human to apply them. That is not how this works.
+- **Do not ask for "push access"** or "a deploy key" or "permission to open a PR." You don't need any of those. If your push fails, the human operator can see the commit locally and push it, but the normal case is that agent-os pushes successfully.
+- **Do not try to clone the repo** or `git checkout -b`. You are already inside a worktree on your own branch.
+
+### How to tell if you're in workspace mode
+
+If the `[project]` section in `agent-os.toml` has `validate.commands` or `setup.commands` set, and your role is in `builder_roles`, you're in workspace mode. Your system prompt will contain a "Workspace" section telling you the branch name and working directory when this is active.
+
+### What if there's no `[project]` section?
+
+Then agents work directly in the company root with no git lifecycle. This is fine for non-code work. If you try to do code work in this mode, there is no automation — but that's also not the expected use case. Ask the operator to configure `[project]`.
+
+---
+
+## Messaging
+
+Three mechanisms with different semantics:
+
+- **Direct messages** (`messages/<recipient>/inbox/`) — one-way FYI. Use `send_message`.
+- **Broadcast** (`messages/broadcast/`) — company-wide announcements. Use `post_broadcast`. One-to-many, not a conversation.
+- **Threads** (`messages/threads/`) — multi-turn dialogues. Write a thread file or append to an existing one. Use when you need back-and-forth.
+
+Messages are **context, not commands**. If you need another agent to DO something, create a task assigned to them. Don't bury action items in messages.
+
+Human escalation: write to `messages/human/inbox/` with a clear subject.
+
+---
+
+## Observability
+
+agent-os includes a built-in observability layer. You don't operate it, but you should know it exists:
+
+- **Pre-flight gate** — before each cycle, agent-os verifies you can write to your directories. If you can't (bad permissions), the cycle is blocked with a notification — no silent failure loops.
+- **Failure circuit breaker** — after N consecutive task failures (default 5), agent-os stops dispatching you and notifies the human. Auto-resets after a cooldown if the underlying issue resolves.
+- **Notifications** — file-drop to `operations/notifications/`, plus optional desktop/webhook/script delivery.
+- **Daily digest** — morning summary at `operations/digests/YYYY-MM-DD.md`.
+- **`agent-os doctor`** — humans run this to diagnose platform/config issues.
+
+If your work feels blocked for mysterious reasons ("I can't write to my task file"), the circuit breaker or pre-flight gate is likely involved. Check `operations/notifications/` for recent alerts and `agents/state/<your-id>/.circuit-breaker.json` for your breaker state.
+
+---
+
+## Scheduling
+
+Agents run on cadence. The two supported schedulers:
+
+- **Cron** — installed via `agent-os cron install`. Each tick calls `agent-os tick` which dispatches cycles, standing orders, drives, dreams, and maintenance tasks.
+- **systemd timers** — for service-account deployments. Same `agent-os tick` entry point, just a different trigger.
+
+You don't interact with the scheduler directly. It invokes you; you check for work; you exit.
+
+---
+
+## CLI Commands (for the human operator)
+
+| Command | Purpose |
+|---------|---------|
+| `agent-os init <name>` | Create a new company filesystem |
+| `agent-os new "title"` | Create a task (backlog by default, `--assign` for queued) |
+| `agent-os status` | Compact system overview |
+| `agent-os cycle <agent-id>` | Run one cycle for an agent |
+| `agent-os run` | Run all agents once |
+| `agent-os task <agent-id> <task-id>` | Run a specific task |
+| `agent-os standing-orders <agent-id>` | Run standing orders if due |
+| `agent-os drives <agent-id>` | Run drive consultation |
+| `agent-os dream <agent-id>` | Run dream cycle |
+| `agent-os dashboard` | Launch the web dashboard |
+| `agent-os doctor` | Diagnose platform health issues |
+| `agent-os digest` | Generate daily health digest |
+| `agent-os budget` | Show budget status |
+| `agent-os backlog promote <task-id>` | Promote backlog → queued |
+| `agent-os archive` | Run archive maintenance |
+| `agent-os manifest` | Regenerate knowledge manifest |
+| `agent-os watchdog` | Check agent liveness |
+| `agent-os cron {install,uninstall,status}` | Manage cron entry |
+| `agent-os update` | Self-update from git (regenerates this doc) |
+
+---
+
+## Config (`agent-os.toml`) Quick Reference
+
+Key sections (full schema in `src/agent_os/config.py`):
+
+```toml
+[company]
+name = "Your Company"
+timezone = "UTC"
+
+[runtime]
+model = "claude-sonnet-4-6"
+user = "corvyd"                  # Service account (for systemd deployments)
+env_file = "/etc/agent-os.env"   # systemd EnvironmentFile, for doctor
+
+[project]                        # Enables the workspace SDLC
+default_branch = "main"
+push = true
+[project.setup]
+commands = ["npm install"]
+[project.validate]
+commands = ["pytest", "ruff check ."]
+on_failure = "retry"
+max_retries = 2
+
+[budget]
+task = 5.00
+daily_cap = 100.00
+weekly_cap = 500.00
+
+[schedule]
+enabled = true
+[schedule.cycles]
+interval_minutes = 15
+
+[notifications]
+enabled = true
+webhook_url = "..."              # Slack/Discord/etc
+min_severity = "warning"
+
+[circuit_breaker]
+enabled = true
+max_failures = 5
+cooldown_minutes = 60
+```
+
+---
+
+## Versioning
+
+agent-os is versioned via git tags (`hatch-vcs`). Your current version is **v{{ version }}**. The changelog of platform updates is at `knowledge/technical/platform-changelog.md` — read it if you want to know what's changed since you last checked.
+
+---
+
+## Where This Doc Lives
+
+This file is at `knowledge/technical/agent-os-platform.md` in your company directory. It is generated from a template bundled with the agent-os package (`src/agent_os/resources/agent-os-platform.md.jinja2`). Do not edit it directly — your edits will be overwritten on the next `agent-os update`. If something in this doc is wrong, propose a change to the platform template.
