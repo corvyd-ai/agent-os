@@ -1173,6 +1173,43 @@ def cmd_cron(args):
             print("Not installed. Run 'agent-os cron install' to set up.")
 
 
+# --- timeline / messages / strategy (read-only inspection) ---
+
+
+def cmd_timeline(args):
+    _set_root(args)
+    from .config import get_config
+    from .read_cmds import render_timeline
+
+    cfg = get_config()
+    print(
+        render_timeline(
+            cfg,
+            date=getattr(args, "date", None),
+            agent=getattr(args, "agent", None),
+            hide_idle=getattr(args, "hide_idle", False),
+        )
+    )
+
+
+def cmd_messages(args):
+    _set_root(args)
+    from .config import get_config
+    from .read_cmds import render_messages
+
+    cfg = get_config()
+    print(render_messages(cfg, channel=args.channel, agent=getattr(args, "agent", None)))
+
+
+def cmd_strategy(args):
+    _set_root(args)
+    from .config import get_config
+    from .read_cmds import render_strategy
+
+    cfg = get_config()
+    print(render_strategy(cfg, topic=args.topic))
+
+
 # --- tasks command (plural — inspection, distinct from `task` runner) ---
 
 
@@ -1550,6 +1587,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
     _add_common_args(p_brief)
     p_brief.set_defaults(func=cmd_briefing)
+
+    # timeline — merged activity feed for a day
+    p_timeline = subparsers.add_parser("timeline", help="Show merged activity log for a day")
+    p_timeline.add_argument("--date", default=None, help="Date to show (YYYY-MM-DD). Default: today.")
+    p_timeline.add_argument("--agent", default=None, help="Filter to a single agent")
+    p_timeline.add_argument("--hide-idle", action="store_true", help="Hide cycle_idle entries")
+    _add_common_args(p_timeline)
+    p_timeline.set_defaults(func=cmd_timeline)
+
+    # messages — inspect broadcasts, threads, human inbox, or an agent's inbox
+    p_messages = subparsers.add_parser("messages", help="Inspect broadcasts, threads, or inboxes")
+    p_messages.add_argument(
+        "channel",
+        choices=["broadcast", "threads", "human", "inbox"],
+        help="Which message channel to inspect",
+    )
+    p_messages.add_argument(
+        "agent", nargs="?", default=None, help="Agent id (required for `inbox`)"
+    )
+    _add_common_args(p_messages)
+    p_messages.set_defaults(func=cmd_messages)
+
+    # strategy — drives / decisions / proposals
+    p_strategy = subparsers.add_parser("strategy", help="Show drives, decisions, or proposals")
+    p_strategy.add_argument("topic", choices=["drives", "decisions", "proposals"])
+    _add_common_args(p_strategy)
+    p_strategy.set_defaults(func=cmd_strategy)
 
     # tasks (plural) — read-only task inspection. Distinct from the `task`
     # runner command which executes a specific task for an agent.
