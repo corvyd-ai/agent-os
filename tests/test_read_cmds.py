@@ -58,8 +58,10 @@ def test_render_timeline_hide_idle_drops_cycle_idle(aios_config: Config):
     ts = datetime.now(UTC).isoformat()
     (aios_config.logs_dir / agent).mkdir(parents=True, exist_ok=True)
     (aios_config.logs_dir / agent / f"{today}.jsonl").write_text(
-        json.dumps({"action": "cycle_idle", "timestamp": ts}) + "\n"
-        + json.dumps({"action": "task_complete", "task": "task-x", "timestamp": ts}) + "\n"
+        json.dumps({"action": "cycle_idle", "timestamp": ts})
+        + "\n"
+        + json.dumps({"action": "task_complete", "task": "task-x", "timestamp": ts})
+        + "\n"
     )
 
     with_idle = render_timeline(aios_config, hide_idle=False)

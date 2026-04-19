@@ -11,8 +11,7 @@ from agent_os.config import Config
 def _register(cfg: Config, agent_id: str, *, name: str = "The Agent", role: str = "Software Engineer") -> None:
     cfg.registry_dir.mkdir(parents=True, exist_ok=True)
     (cfg.registry_dir / f"{agent_id}.md").write_text(
-        f"---\nid: {agent_id}\nname: {name}\nrole: {role}\n---\n\n"
-        "# Agent description\n\nDescription goes here.\n"
+        f"---\nid: {agent_id}\nname: {name}\nrole: {role}\n---\n\n# Agent description\n\nDescription goes here.\n"
     )
 
 

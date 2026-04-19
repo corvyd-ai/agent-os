@@ -63,10 +63,7 @@ def render_task_list(
         return "No tasks matched.\n"
     lines = [f"{'id':<28} {'status':<12} {'assigned_to':<28} {'priority':<10} title", "-" * 100]
     for r in rows:
-        lines.append(
-            f"{r['id']:<28} {r['status']:<12} {r['assigned_to']:<28} "
-            f"{r['priority']:<10} {r['title']}"
-        )
+        lines.append(f"{r['id']:<28} {r['status']:<12} {r['assigned_to']:<28} {r['priority']:<10} {r['title']}")
     return "\n".join(lines) + "\n"
 
 
@@ -79,10 +76,7 @@ def render_task_list_json(
     rows = _collect_tasks(config, status=status)
     if agent:
         rows = [r for r in rows if r["assigned_to"] == agent]
-    slim = [
-        {k: v for k, v in r.items() if not k.startswith("_")}
-        for r in rows
-    ]
+    slim = [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows]
     return json.dumps(slim, indent=2, default=_json_default)
 
 
