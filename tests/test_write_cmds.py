@@ -60,7 +60,7 @@ default = "medium"
 def test_set_budget_caps_updates_daily(toml_company):
     from agent_os.write_cmds import set_budget_caps
 
-    cfg, toml = toml_company
+    _, toml = toml_company
     set_budget_caps(toml, daily=25.0)
 
     reloaded = Config.from_toml(toml)
@@ -86,11 +86,7 @@ def test_set_budget_caps_preserves_comments(tmp_path):
     from agent_os.write_cmds import set_budget_caps
 
     toml = tmp_path / "agent-os.toml"
-    toml.write_text(
-        "# Our company config\n\n"
-        '[company]\nname = "X"\nroot = "."\n\n'
-        "[budget]\ndaily_cap = 5.0\n"
-    )
+    toml.write_text('# Our company config\n\n[company]\nname = "X"\nroot = "."\n\n[budget]\ndaily_cap = 5.0\n')
     set_budget_caps(toml, daily=12.0)
     text = toml.read_text()
     assert "Our company config" in text

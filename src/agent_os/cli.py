@@ -1640,9 +1640,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.set_defaults(func=cmd_briefing)
 
     # budget-set — mutate agent-os.toml budget caps
-    p_budget_set = subparsers.add_parser(
-        "budget-set", help="Update daily/weekly/monthly budget caps in agent-os.toml"
-    )
+    p_budget_set = subparsers.add_parser("budget-set", help="Update daily/weekly/monthly budget caps in agent-os.toml")
     p_budget_set.add_argument("--daily", type=float, default=None, help="New daily cap in USD")
     p_budget_set.add_argument("--weekly", type=float, default=None, help="New weekly cap in USD")
     p_budget_set.add_argument("--monthly", type=float, default=None, help="New monthly cap in USD")
@@ -1657,9 +1655,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_autonomy.set_defaults(func=cmd_autonomy)
 
     # schedule-toggle — flip scheduler master switch or sub-feature
-    p_sched_tog = subparsers.add_parser(
-        "schedule-toggle", help="Flip the scheduler master switch or a sub-feature"
-    )
+    p_sched_tog = subparsers.add_parser("schedule-toggle", help="Flip the scheduler master switch or a sub-feature")
     p_sched_tog.add_argument(
         "kind",
         choices=["scheduler", "cycles", "standing-orders", "drives", "dreams"],
@@ -1684,9 +1680,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["broadcast", "threads", "human", "inbox"],
         help="Which message channel to inspect",
     )
-    p_messages.add_argument(
-        "agent", nargs="?", default=None, help="Agent id (required for `inbox`)"
-    )
+    p_messages.add_argument("agent", nargs="?", default=None, help="Agent id (required for `inbox`)")
     _add_common_args(p_messages)
     p_messages.set_defaults(func=cmd_messages)
 
@@ -1718,9 +1712,7 @@ def _build_parser() -> argparse.ArgumentParser:
     agent_sub = p_agent.add_subparsers(dest="agent_action")
 
     p_agent_list = agent_sub.add_parser("list", help="List all registered agents")
-    p_agent_list.add_argument(
-        "--format", choices=["human", "json"], default="human", help="Output format"
-    )
+    p_agent_list.add_argument("--format", choices=["human", "json"], default="human", help="Output format")
     _add_common_args(p_agent_list)
 
     p_agent_show = agent_sub.add_parser("show", help="Show detail for one agent")
