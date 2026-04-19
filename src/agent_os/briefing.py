@@ -43,8 +43,10 @@ def _render_operational_status(cfg: Config) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _render_roster(cfg: Config) -> str:
+def _render_roster(cfg: Config, *, scope: str | None = None) -> str:
     agents = list_agents(config=cfg)
+    if scope:
+        agents = [a for a in agents if a.agent_id == scope]
     if not agents:
         return "## Agents\n\n_No agents registered._\n"
     lines = ["## Agents\n"]
@@ -231,7 +233,7 @@ def _render_messages(cfg: Config) -> str:
 _IDLE_ACTIONS = {"cycle_idle", "cycle_skipped"}
 
 
-def _render_recent_activity(cfg: Config, *, limit: int = 15) -> str:
+def _render_recent_activity(cfg: Config, *, limit: int = 15, scope: str | None = None) -> str:
     if not cfg.logs_dir.exists():
         return "## Recent activity\n\n_No activity logs yet._\n"
 
@@ -243,6 +245,8 @@ def _render_recent_activity(cfg: Config, *, limit: int = 15) -> str:
     entries: list[tuple[str, str, dict]] = []
     for agent_dir in sorted(cfg.logs_dir.iterdir()):
         if not agent_dir.is_dir():
+            continue
+        if scope and agent_dir.name != scope:
             continue
         for date in dates:
             for entry in parse_jsonl_file(agent_dir / f"{date}.jsonl"):
@@ -268,15 +272,19 @@ def _render_recent_activity(cfg: Config, *, limit: int = 15) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _render_health_snapshot(cfg: Config) -> str:
+def _render_health_snapshot(cfg: Config, *, scope: str | None = None) -> str:
     try:
         health = compute_all_health(days=7, config=cfg)
     except Exception as e:  # pragma: no cover — defensive
         return f"## Health\n\n_Health engine errored: {e}_\n"
 
-    lines = ["## Health snapshot (7-day)\n"]
-    lines.append(f"**System composite:** {health['system_composite']}/100")
     agents = health.get("agents", {})
+    if scope:
+        agents = {k: v for k, v in agents.items() if k == scope}
+        lines = [f"## Health snapshot — {scope} (7-day)\n"]
+    else:
+        lines = ["## Health snapshot (7-day)\n"]
+        lines.append(f"**System composite:** {health['system_composite']}/100")
     if not agents:
         lines.append("_No registered agents yet._")
         return "\n".join(lines) + "\n"
@@ -332,17 +340,18 @@ def render_briefing(config: Config, *, depth: str = "short", agent: str | None =
 
     `depth="short"` keeps the output compact; `"full"` retains the same structure
     but expands sections (e.g. more queued tasks, more timeline entries).
-    `agent` scopes the briefing to a single agent when supplied.
+    `agent` scopes the briefing to a single agent when supplied — the roster,
+    recent activity, and health snapshot are filtered to that agent.
     """
     sections = [
         _render_header(config),
         _render_operational_status(config),
         _render_attention_rollup(config),
-        _render_roster(config),
+        _render_roster(config, scope=agent),
         _render_work_queue(config),
         _render_strategic_context(config),
         _render_messages(config),
-        _render_recent_activity(config, limit=30 if depth == "full" else 12),
-        _render_health_snapshot(config),
+        _render_recent_activity(config, limit=30 if depth == "full" else 12, scope=agent),
+        _render_health_snapshot(config, scope=agent),
     ]
     return "\n".join(sections) + "\n"

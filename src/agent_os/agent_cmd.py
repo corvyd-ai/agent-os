@@ -11,6 +11,14 @@ from .parsers.jsonl import parse_jsonl_file
 from .registry import list_agents, load_agent
 
 
+def agent_exists(config: Config, agent_id: str) -> bool:
+    """True if `agent_id` has a registry file."""
+    registry = config.registry_dir
+    if not registry.exists():
+        return False
+    return (registry / f"{agent_id}.md").exists()
+
+
 def _today(cfg: Config) -> str:
     return datetime.now(cfg.tz).date().isoformat()
 

@@ -1177,7 +1177,11 @@ def cmd_cron(args):
 
 
 def _discover_toml_path(args) -> Path:
-    """Locate agent-os.toml the same way `_set_root` does, but return the path."""
+    """Locate agent-os.toml the same way `_set_root` does, but return the path.
+
+    On failure, prints a clear error with recovery hints (cd or --root) and
+    exits non-zero so agents and shells can detect it.
+    """
     from .config import Config as _Cfg
 
     config_path = getattr(args, "config", None)
@@ -1186,13 +1190,27 @@ def _discover_toml_path(args) -> Path:
         return Path(config_path)
     discovered = _Cfg.discover_toml(Path(root).resolve() if root else None)
     if discovered is None:
-        print("Error: could not find agent-os.toml.", file=sys.stderr)
+        print(
+            "Error: could not find agent-os.toml.\n"
+            "Hint: run this from inside the company directory, "
+            "or pass --root /path/to/company (or --config /path/to/agent-os.toml).",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return discovered
 
 
 def cmd_budget_set(args):
+    """Update budget caps. Requires at least one of --daily/--weekly/--monthly."""
     from .write_cmds import set_budget_caps
+
+    if args.daily is None and args.weekly is None and args.monthly is None:
+        print(
+            "Error: nothing to set. Pass at least one of --daily, --weekly, --monthly.\n"
+            "Example: agent-os budget-set --daily 50",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     toml = _discover_toml_path(args)
     set_budget_caps(toml, daily=args.daily, weekly=args.weekly, monthly=args.monthly)
@@ -1248,6 +1266,13 @@ def cmd_messages(args):
     from .config import get_config
     from .read_cmds import render_messages
 
+    if args.channel == "inbox" and not getattr(args, "agent", None):
+        print(
+            "Error: the `inbox` channel requires an agent id.\nExample: agent-os messages inbox agent-001-maker",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     cfg = get_config()
     print(render_messages(cfg, channel=args.channel, agent=getattr(args, "agent", None)))
 
@@ -1268,7 +1293,7 @@ def cmd_tasks(args):
     """Dispatch `agent-os tasks {list,show}`."""
     _set_root(args)
     from .config import get_config
-    from .task_cmd import render_task_list, render_task_list_json, render_task_show
+    from .task_cmd import render_task_list, render_task_list_json, render_task_show, task_exists
 
     cfg = get_config()
     action = getattr(args, "tasks_action", None)
@@ -1278,9 +1303,18 @@ def cmd_tasks(args):
         else:
             print(render_task_list(cfg, status=getattr(args, "status", None), agent=getattr(args, "agent", None)))
     elif action == "show":
+        if not task_exists(cfg, args.task_id):
+            print(
+                f"Error: task '{args.task_id}' not found.\nHint: run `agent-os tasks list` to see all known task ids.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(render_task_show(cfg, args.task_id))
     else:
-        print("Usage: agent-os tasks {list|show <task-id>}")
+        print(
+            "Error: missing subcommand.\nUsage: agent-os tasks {list|show <task-id>}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -1290,7 +1324,7 @@ def cmd_tasks(args):
 def cmd_agent(args):
     """Dispatch `agent-os agent {list,show}`."""
     _set_root(args)
-    from .agent_cmd import render_agent_list, render_agent_list_json, render_agent_show
+    from .agent_cmd import agent_exists, render_agent_list, render_agent_list_json, render_agent_show
     from .config import get_config
 
     cfg = get_config()
@@ -1301,9 +1335,19 @@ def cmd_agent(args):
         else:
             print(render_agent_list(cfg))
     elif action == "show":
+        if not agent_exists(cfg, args.agent_id):
+            print(
+                f"Error: agent '{args.agent_id}' not found in registry.\n"
+                "Hint: run `agent-os agent list` to see registered agents.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(render_agent_show(cfg, args.agent_id))
     else:
-        print("Usage: agent-os agent {list|show <agent-id>}")
+        print(
+            "Error: missing subcommand.\nUsage: agent-os agent {list|show <agent-id>}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -1331,12 +1375,20 @@ def cmd_cost(args):
 def cmd_health(args):
     """Render per-agent and system health scores."""
     _set_root(args)
+    from .agent_cmd import agent_exists
     from .config import get_config
     from .health_cmd import render_health, render_health_json
 
     cfg = get_config()
     days = getattr(args, "days", 7)
     agent = getattr(args, "agent", None)
+
+    if agent and not agent_exists(cfg, agent):
+        print(
+            f"Error: agent '{agent}' not found in registry.\nHint: run `agent-os agent list` to see registered agents.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if getattr(args, "format", "human") == "json":
         print(render_health_json(cfg, days=days, agent=agent))
@@ -1350,14 +1402,20 @@ def cmd_health(args):
 def cmd_briefing(args):
     """Render the LLM-optimized session-bootstrap briefing to stdout."""
     _set_root(args)
+    from .agent_cmd import agent_exists
     from .briefing import render_briefing
     from .config import get_config
 
-    output = render_briefing(
-        get_config(),
-        depth=getattr(args, "depth", "short"),
-        agent=getattr(args, "agent", None),
-    )
+    cfg = get_config()
+    agent = getattr(args, "agent", None)
+    if agent and not agent_exists(cfg, agent):
+        print(
+            f"Error: agent '{agent}' not found in registry.\nHint: run `agent-os agent list` to see registered agents.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    output = render_briefing(cfg, depth=getattr(args, "depth", "short"), agent=agent)
     print(output)
 
 
@@ -1412,15 +1470,76 @@ def _set_root(args):
     configure(cfg)
 
 
-def _add_common_args(parser):
-    """Add arguments common to all agent-invoking subcommands."""
+def _add_config_args(parser):
+    """Add --root / --config — the minimum needed to locate a company.
+
+    Use this on commands that don't invoke an agent (no model turns, no cost).
+    """
     parser.add_argument("--root", default=None, help="Company root directory (default: current directory)")
     parser.add_argument("--config", default=None, help="Path to agent-os.toml config file")
+
+
+def _add_common_args(parser):
+    """Add arguments common to all agent-invoking subcommands.
+
+    Superset of `_add_config_args` — includes `--max-turns` and `--max-budget`,
+    which only make sense for commands that actually invoke an agent (cycle,
+    task, run, standing-orders, drives, dream).
+    """
+    _add_config_args(parser)
     parser.add_argument("--max-turns", type=int, default=None, help="Override max turns for this invocation")
     parser.add_argument("--max-budget", type=float, default=None, help="Override max budget (USD) for this invocation")
 
 
 # --- main entry point ---
+
+
+_COMMAND_GROUPS_EPILOG = """\
+Common commands, grouped by intent:
+
+  Get oriented (run these in a new session)
+    briefing          Dense LLM-optimized summary of company state (start here)
+    status            Compact system status overview
+    health            Per-agent and system health scores
+    cost              Spend rollup by day / agent / task type
+
+  Inspect
+    agent {list,show} Registered agents and per-agent detail
+    tasks {list,show} Tasks across all status directories
+    messages <ch>     Broadcasts, threads, human inbox, agent inbox
+    strategy <topic>  Drives, decisions, or proposals
+    timeline          Merged activity log for a day
+
+  Run an agent
+    cycle <agent>             One work cycle (tasks, messages, threads)
+    task <agent> <task-id>    A specific task
+    drives <agent>            Drive consultation
+    standing-orders <agent>   Standing orders if due
+    dream <agent>             Nightly dream cycle
+    run                       Cycle every registered agent once
+    tick                      Scheduler tick (the one cron entry)
+
+  Control
+    budget-set         Update daily / weekly / monthly caps
+    autonomy           Set per-agent autonomy level
+    schedule-toggle    Flip scheduler features on/off
+    backlog {promote,reject}  Move tasks out of backlog
+
+  Create
+    init <name>   Create a new company filesystem
+    new <title>   Create a task
+
+  Maintenance
+    doctor        Diagnose system health issues
+    digest        Daily health digest
+    watchdog      Check agent liveness
+    archive       Move stale items to _archive/
+    manifest      Regenerate knowledge manifest
+    update        Self-update agent-os from git
+    cron          Manage the cron entry
+
+Run `agent-os <command> --help` for details on any command.
+"""
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1431,9 +1550,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-os",
         description="The open-source operations layer for AI agents.",
+        epilog=_COMMAND_GROUPS_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>", help="Run `agent-os <command> --help`")
 
     # init
     p_init = subparsers.add_parser("init", help="Create a new agent-os company")
@@ -1636,7 +1757,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Briefing depth (short keeps it to one screen; full expands per-section detail)",
     )
     p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
-    _add_common_args(p_brief)
+    _add_config_args(p_brief)
     p_brief.set_defaults(func=cmd_briefing)
 
     # budget-set — mutate agent-os.toml budget caps
@@ -1644,14 +1765,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_budget_set.add_argument("--daily", type=float, default=None, help="New daily cap in USD")
     p_budget_set.add_argument("--weekly", type=float, default=None, help="New weekly cap in USD")
     p_budget_set.add_argument("--monthly", type=float, default=None, help="New monthly cap in USD")
-    _add_common_args(p_budget_set)
+    _add_config_args(p_budget_set)
     p_budget_set.set_defaults(func=cmd_budget_set)
 
     # autonomy — set per-agent autonomy level
     p_autonomy = subparsers.add_parser("autonomy", help="Set per-agent autonomy level")
     p_autonomy.add_argument("agent_id")
     p_autonomy.add_argument("level", choices=["low", "medium", "high"])
-    _add_common_args(p_autonomy)
+    _add_config_args(p_autonomy)
     p_autonomy.set_defaults(func=cmd_autonomy)
 
     # schedule-toggle — flip scheduler master switch or sub-feature
@@ -1662,7 +1783,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Which scheduler feature to toggle",
     )
     p_sched_tog.add_argument("state", choices=["on", "off"])
-    _add_common_args(p_sched_tog)
+    _add_config_args(p_sched_tog)
     p_sched_tog.set_defaults(func=cmd_schedule_toggle)
 
     # timeline — merged activity feed for a day
@@ -1670,7 +1791,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_timeline.add_argument("--date", default=None, help="Date to show (YYYY-MM-DD). Default: today.")
     p_timeline.add_argument("--agent", default=None, help="Filter to a single agent")
     p_timeline.add_argument("--hide-idle", action="store_true", help="Hide cycle_idle entries")
-    _add_common_args(p_timeline)
+    _add_config_args(p_timeline)
     p_timeline.set_defaults(func=cmd_timeline)
 
     # messages — inspect broadcasts, threads, human inbox, or an agent's inbox
@@ -1681,13 +1802,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Which message channel to inspect",
     )
     p_messages.add_argument("agent", nargs="?", default=None, help="Agent id (required for `inbox`)")
-    _add_common_args(p_messages)
+    _add_config_args(p_messages)
     p_messages.set_defaults(func=cmd_messages)
 
     # strategy — drives / decisions / proposals
     p_strategy = subparsers.add_parser("strategy", help="Show drives, decisions, or proposals")
-    p_strategy.add_argument("topic", choices=["drives", "decisions", "proposals"])
-    _add_common_args(p_strategy)
+    p_strategy.add_argument(
+        "topic",
+        choices=["drives", "decisions", "proposals"],
+        help="Strategy topic to show: drives (strategy/drives.md), decisions (index of strategy/decisions/), or proposals (active + decided)",
+    )
+    _add_config_args(p_strategy)
     p_strategy.set_defaults(func=cmd_strategy)
 
     # tasks (plural) — read-only task inspection. Distinct from the `task`
@@ -1699,11 +1824,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tasks_list.add_argument("--status", default=None, help="Filter by status (queued, in-progress, done, ...)")
     p_tasks_list.add_argument("--agent", default=None, help="Filter by assigned agent")
     p_tasks_list.add_argument("--format", choices=["human", "json"], default="human")
-    _add_common_args(p_tasks_list)
+    _add_config_args(p_tasks_list)
 
     p_tasks_show = tasks_sub.add_parser("show", help="Show full detail for one task")
     p_tasks_show.add_argument("task_id", help="Task id")
-    _add_common_args(p_tasks_show)
+    _add_config_args(p_tasks_show)
 
     p_tasks.set_defaults(func=cmd_tasks)
 
@@ -1713,11 +1838,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_agent_list = agent_sub.add_parser("list", help="List all registered agents")
     p_agent_list.add_argument("--format", choices=["human", "json"], default="human", help="Output format")
-    _add_common_args(p_agent_list)
+    _add_config_args(p_agent_list)
 
     p_agent_show = agent_sub.add_parser("show", help="Show detail for one agent")
     p_agent_show.add_argument("agent_id", help="Agent id to show")
-    _add_common_args(p_agent_show)
+    _add_config_args(p_agent_show)
 
     p_agent.set_defaults(func=cmd_agent)
 
@@ -1728,7 +1853,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--by", choices=["agent", "task-type"], default="agent", help="Breakdown dimension for human mode"
     )
     p_cost.add_argument("--format", choices=["human", "json"], default="human", help="Output format")
-    _add_common_args(p_cost)
+    _add_config_args(p_cost)
     p_cost.set_defaults(func=cmd_cost)
 
     # health — per-agent + system health scores
@@ -1741,7 +1866,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="human",
         help="Output format: human (default) or json (for agents/scripts)",
     )
-    _add_common_args(p_health)
+    _add_config_args(p_health)
     p_health.set_defaults(func=cmd_health)
 
     return parser
