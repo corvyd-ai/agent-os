@@ -1173,6 +1173,29 @@ def cmd_cron(args):
             print("Not installed. Run 'agent-os cron install' to set up.")
 
 
+# --- agent command ---
+
+
+def cmd_agent(args):
+    """Dispatch `agent-os agent {list,show}`."""
+    _set_root(args)
+    from .agent_cmd import render_agent_list, render_agent_list_json, render_agent_show
+    from .config import get_config
+
+    cfg = get_config()
+    action = getattr(args, "agent_action", None)
+    if action == "list":
+        if getattr(args, "format", "human") == "json":
+            print(render_agent_list_json(cfg))
+        else:
+            print(render_agent_list(cfg))
+    elif action == "show":
+        print(render_agent_show(cfg, args.agent_id))
+    else:
+        print("Usage: agent-os agent {list|show <agent-id>}")
+        sys.exit(1)
+
+
 # --- cost command ---
 
 
@@ -1504,6 +1527,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
     _add_common_args(p_brief)
     p_brief.set_defaults(func=cmd_briefing)
+
+    # agent — inspect agents
+    p_agent = subparsers.add_parser("agent", help="List or show registered agents")
+    agent_sub = p_agent.add_subparsers(dest="agent_action")
+
+    p_agent_list = agent_sub.add_parser("list", help="List all registered agents")
+    p_agent_list.add_argument(
+        "--format", choices=["human", "json"], default="human", help="Output format"
+    )
+    _add_common_args(p_agent_list)
+
+    p_agent_show = agent_sub.add_parser("show", help="Show detail for one agent")
+    p_agent_show.add_argument("agent_id", help="Agent id to show")
+    _add_common_args(p_agent_show)
+
+    p_agent.set_defaults(func=cmd_agent)
 
     # cost — spend rollup
     p_cost = subparsers.add_parser("cost", help="Show spend totals by day, agent, and task type")
