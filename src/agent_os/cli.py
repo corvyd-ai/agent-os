@@ -1173,6 +1173,25 @@ def cmd_cron(args):
             print("Not installed. Run 'agent-os cron install' to set up.")
 
 
+# --- health command ---
+
+
+def cmd_health(args):
+    """Render per-agent and system health scores."""
+    _set_root(args)
+    from .config import get_config
+    from .health_cmd import render_health, render_health_json
+
+    cfg = get_config()
+    days = getattr(args, "days", 7)
+    agent = getattr(args, "agent", None)
+
+    if getattr(args, "format", "human") == "json":
+        print(render_health_json(cfg, days=days, agent=agent))
+    else:
+        print(render_health(cfg, days=days, agent=agent))
+
+
 # --- briefing command ---
 
 
@@ -1467,6 +1486,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
     _add_common_args(p_brief)
     p_brief.set_defaults(func=cmd_briefing)
+
+    # health — per-agent + system health scores
+    p_health = subparsers.add_parser("health", help="Show per-agent and system health scores")
+    p_health.add_argument("--agent", default=None, help="Scope the report to a single agent id")
+    p_health.add_argument("--days", type=int, default=7, help="Window in days (default: 7)")
+    p_health.add_argument(
+        "--format",
+        choices=["human", "json"],
+        default="human",
+        help="Output format: human (default) or json (for agents/scripts)",
+    )
+    _add_common_args(p_health)
+    p_health.set_defaults(func=cmd_health)
 
     return parser
 
