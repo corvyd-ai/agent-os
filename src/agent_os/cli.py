@@ -776,7 +776,9 @@ def cmd_project(args):
         return cmd_project_check(args)
     if action == "init":
         return cmd_project_init(args)
-    print("Usage: agent-os project {check|init}", file=sys.stderr)
+    if action == "backfill":
+        return cmd_project_backfill(args)
+    print("Usage: agent-os project {check|init|backfill}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -921,6 +923,160 @@ def cmd_project_init(args):
     else:
         print()
         print("All checks passed. The workspace SDLC is ready.")
+
+
+def cmd_project_backfill(args):
+    """Bootstrap the platform changelog from git history.
+
+    One-time catch-up for deployments that existed before release notes
+    shipped. Reads the agent-os platform repo's git log + tags, generates
+    changelog entries grouped by tag boundary, and writes them to the
+    company's ``knowledge/technical/`` directory.
+    """
+    _set_root(args)
+    from . import __version__
+    from .config import get_config
+    from .release_notes import build_backfill_entries, write_backfill_notes
+
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        print(
+            "Error: agent-os is not installed from a git repository — can't read history to backfill.",
+            file=sys.stderr,
+        )
+        print("Install from git if you want to use backfill.", file=sys.stderr)
+        sys.exit(1)
+
+    since = getattr(args, "since", None)
+    force = getattr(args, "force", False)
+    no_broadcast = getattr(args, "no_broadcast", False)
+
+    # Pull commits + tags from the platform repo
+    commits = _read_git_commits(repo_root, since=since)
+    tags = _read_git_tags(repo_root, since=since)
+
+    if not commits:
+        print("No commits found to backfill.")
+        return
+
+    entries = build_backfill_entries(
+        commits=commits,
+        tags=tags,
+        current_version=__version__,
+    )
+
+    total_commits = sum(len(e.commit_subjects) for e in entries)
+    print()
+    print("agent-os project backfill")
+    print("=" * 40)
+    print()
+    print(f"Source:  {repo_root}")
+    print(f"Commits: {len(commits)} ({total_commits} grouped into {len(entries)} changelog entries)")
+    print(f"Tags:    {len(tags)}")
+    print(f"Target:  {get_config().company_root}/knowledge/technical/")
+    print()
+
+    if not getattr(args, "yes", False):
+        try:
+            answer = input("Proceed? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+        if answer and answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    result = write_backfill_notes(
+        entries=entries,
+        current_version=__version__,
+        force=force,
+        post_broadcast=not no_broadcast,
+    )
+
+    if result.errors:
+        for err in result.errors:
+            print(f"Error: {err}", file=sys.stderr)
+        if not result.changelog_path:
+            sys.exit(1)
+
+    print()
+    if result.reference_doc_path:
+        print(f"  ✓ Reference doc: {result.reference_doc_path}")
+    if result.changelog_path:
+        print(f"  ✓ Changelog:     {result.changelog_path} ({result.entries_written} entries)")
+    if result.broadcast_id:
+        print(f"  ✓ Broadcast:     {result.broadcast_id}")
+    elif no_broadcast:
+        print("  · Broadcast skipped (--no-broadcast)")
+    print()
+
+
+def _read_git_commits(repo_root: Path, *, since: str | None = None) -> list[tuple[str, str, str]]:
+    """Read commits from the platform repo in chronological order.
+
+    Returns [(sha, subject, iso_date), ...] oldest first.
+    """
+    import subprocess
+
+    rev_range = f"{since}..HEAD" if since else "HEAD"
+    # Reverse chronological by default; we want chronological for grouping
+    result = subprocess.run(
+        ["git", "log", "--reverse", "--pretty=format:%H\t%s\t%cI", rev_range],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+
+    commits: list[tuple[str, str, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            commits.append((parts[0], parts[1], parts[2]))
+    return commits
+
+
+def _read_git_tags(repo_root: Path, *, since: str | None = None) -> list[tuple[str, str, str]]:
+    """Read tags from the platform repo in chronological order.
+
+    Returns [(tag_name, sha, iso_date), ...] oldest first. Filters to tags
+    that look like versions (start with 'v' followed by a digit) — other
+    tags (e.g., 'stable', 'prod') aren't version boundaries.
+    """
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "git",
+            "for-each-ref",
+            "--sort=creatordate",
+            "--format=%(refname:short)\t%(objectname)\t%(creatordate:iso-strict)",
+            "refs/tags/",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+
+    tags: list[tuple[str, str, str]] = []
+    since_seen = since is None
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        name, sha, ts = parts
+        if not (name.startswith("v") and len(name) > 1 and name[1].isdigit()):
+            continue
+        # If --since was provided, filter to tags reachable from that point forward
+        if since and not since_seen:
+            if name == since:
+                since_seen = True
+            continue
+        tags.append((name, sha, ts))
+    return tags
 
 
 # --- cron command ---
@@ -1227,6 +1383,28 @@ def main():
     p_project_init.add_argument("-y", "--yes", action="store_true", help="Use defaults non-interactively")
     p_project_init.add_argument("--ssh-help", action="store_true", help="Print SSH deploy-key setup steps and exit")
     _add_common_args(p_project_init)
+
+    p_project_backfill = project_sub.add_parser(
+        "backfill",
+        help="One-time bootstrap: seed the platform changelog from git history (for deployments that existed before release notes shipped)",
+    )
+    p_project_backfill.add_argument(
+        "--since",
+        default=None,
+        help="Start point for history (commit SHA or tag). Default: entire history.",
+    )
+    p_project_backfill.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the changelog even if it already has entries",
+    )
+    p_project_backfill.add_argument(
+        "--no-broadcast",
+        action="store_true",
+        help="Skip posting the 'release notes enabled' broadcast",
+    )
+    p_project_backfill.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    _add_common_args(p_project_backfill)
 
     p_project.set_defaults(func=cmd_project)
 

@@ -3,10 +3,15 @@
 from pathlib import Path
 
 from agent_os.release_notes import (
+    BackfillEntry,
     UpdateNotesResult,
     _append_changelog_entry,
     _build_broadcast_body,
+    _changelog_has_entries,
     _render_reference_doc,
+    _strip_v,
+    build_backfill_entries,
+    write_backfill_notes,
     write_update_notes,
 )
 
@@ -235,3 +240,210 @@ class TestWriteUpdateNotes:
         changelog = (cfg.company_root / "knowledge" / "technical" / "platform-changelog.md").read_text()
         assert "first feature" in changelog
         assert "second feature" in changelog
+
+
+class TestStripV:
+    def test_strips_v_prefix(self):
+        assert _strip_v("v0.3.0") == "0.3.0"
+
+    def test_leaves_non_version_tags_alone(self):
+        assert _strip_v("stable") == "stable"
+        assert _strip_v("release") == "release"
+
+    def test_leaves_single_v_alone(self):
+        assert _strip_v("v") == "v"
+
+
+class TestChangelogHasEntries:
+    def test_empty_file(self):
+        assert not _changelog_has_entries("")
+
+    def test_header_only(self):
+        assert not _changelog_has_entries("# agent-os Platform Changelog\n\nSome description\n")
+
+    def test_with_entry(self):
+        text = "# agent-os Platform Changelog\n\n## v0.3.0 — 2026-04-16\n\nchanges\n"
+        assert _changelog_has_entries(text)
+
+
+class TestBuildBackfillEntries:
+    def test_no_commits_returns_empty(self):
+        entries = build_backfill_entries(commits=[], tags=[], current_version="0.3.0")
+        assert entries == []
+
+    def test_no_tags_produces_single_entry(self):
+        commits = [
+            ("sha1", "feat: first", "2026-01-01T00:00:00Z"),
+            ("sha2", "feat: second", "2026-02-01T00:00:00Z"),
+            ("sha3", "feat: third", "2026-03-01T00:00:00Z"),
+        ]
+        entries = build_backfill_entries(commits=commits, tags=[], current_version="0.3.0")
+        assert len(entries) == 1
+        assert entries[0].version == "0.3.0"
+        assert entries[0].previous_version == "initial"
+        # Newest first within the entry
+        assert entries[0].commit_subjects == ["feat: third", "feat: second", "feat: first"]
+
+    def test_groups_by_tag_boundary(self):
+        commits = [
+            ("sha1", "feat: A", "2026-01-01T00:00:00Z"),
+            ("sha2", "feat: B", "2026-02-01T00:00:00Z"),  # <- v0.1.0
+            ("sha3", "feat: C", "2026-02-15T00:00:00Z"),
+            ("sha4", "feat: D", "2026-03-01T00:00:00Z"),  # <- v0.2.0
+            ("sha5", "feat: E", "2026-04-01T00:00:00Z"),  # post-tag, goes to current
+        ]
+        tags = [
+            ("v0.1.0", "sha2", "2026-02-01T00:00:00Z"),
+            ("v0.2.0", "sha4", "2026-03-01T00:00:00Z"),
+        ]
+        entries = build_backfill_entries(commits=commits, tags=tags, current_version="0.3.0")
+        # 3 entries: v0.1.0, v0.2.0, 0.3.0 (unreleased/current)
+        assert len(entries) == 3
+        # Newest first in the result
+        assert entries[0].version == "0.3.0"
+        assert entries[0].previous_version == "0.2.0"
+        assert entries[0].commit_subjects == ["feat: E"]
+
+        assert entries[1].version == "0.2.0"
+        assert entries[1].previous_version == "0.1.0"
+        # feat: D is the tagged commit; feat: C is between tags. Both belong to v0.2.0.
+        assert set(entries[1].commit_subjects) == {"feat: C", "feat: D"}
+
+        assert entries[2].version == "0.1.0"
+        assert entries[2].previous_version == "initial"
+
+    def test_no_post_tag_commits_omits_current_entry(self):
+        commits = [
+            ("sha1", "feat: A", "2026-01-01T00:00:00Z"),
+            ("sha2", "feat: B", "2026-02-01T00:00:00Z"),
+        ]
+        tags = [
+            ("v0.1.0", "sha2", "2026-02-01T00:00:00Z"),
+        ]
+        entries = build_backfill_entries(commits=commits, tags=tags, current_version="0.1.0")
+        # HEAD is the tag — only one entry
+        assert len(entries) == 1
+        assert entries[0].version == "0.1.0"
+
+
+class TestWriteBackfillNotes:
+    def test_writes_all_three_artifacts(self, aios_config):
+        from agent_os.config import Config
+
+        cfg = Config(company_root=aios_config.company_root, log_also_print=False)
+        entries = [
+            BackfillEntry(
+                version="0.3.0",
+                previous_version="0.2.0",
+                commit_subjects=["feat: thing"],
+                timestamp="2026-04-16T12:00:00+00:00",
+            ),
+            BackfillEntry(
+                version="0.2.0",
+                previous_version="initial",
+                commit_subjects=["feat: earlier"],
+                timestamp="2026-03-01T12:00:00+00:00",
+            ),
+        ]
+        result = write_backfill_notes(entries=entries, current_version="0.3.0", config=cfg)
+
+        assert result.errors == []
+        assert result.entries_written == 2
+        assert result.broadcast_id  # broadcast posted by default
+
+        changelog = Path(result.changelog_path).read_text()
+        # Newest on top
+        idx_new = changelog.index("v0.3.0")
+        idx_old = changelog.index("v0.2.0")
+        assert idx_new < idx_old
+        # Backfill notice is present and sits above the entries
+        assert "backfilled" in changelog.lower()
+        idx_note = changelog.lower().index("backfilled")
+        assert idx_note < idx_new
+
+    def test_respects_no_broadcast(self, aios_config):
+        from agent_os.config import Config
+
+        cfg = Config(company_root=aios_config.company_root, log_also_print=False)
+        entries = [
+            BackfillEntry(
+                version="0.3.0",
+                previous_version="initial",
+                commit_subjects=["x"],
+                timestamp="2026-04-16T12:00:00+00:00",
+            )
+        ]
+        result = write_backfill_notes(entries=entries, current_version="0.3.0", post_broadcast=False, config=cfg)
+
+        assert result.broadcast_id == ""
+        # No broadcast file should have been written
+        broadcasts = list(cfg.broadcast_dir.glob("*.md"))
+        assert broadcasts == []
+
+    def test_refuses_to_clobber_existing_changelog(self, aios_config):
+        """If the changelog already has entries, backfill bails unless force=True.
+        Protects against accidentally stomping live history after a few
+        normal updates have landed."""
+        from agent_os.config import Config
+
+        cfg = Config(company_root=aios_config.company_root, log_also_print=False)
+
+        # Simulate a few normal updates having already landed
+        write_update_notes(
+            previous_commit="a",
+            new_commit="b",
+            commit_subjects=["live entry"],
+            previous_version="0.2.0",
+            new_version="0.3.0",
+            config=cfg,
+        )
+
+        entries = [
+            BackfillEntry(
+                version="0.1.0",
+                previous_version="initial",
+                commit_subjects=["historical"],
+                timestamp="2026-01-01T00:00:00+00:00",
+            )
+        ]
+        result = write_backfill_notes(entries=entries, current_version="0.3.0", config=cfg)
+
+        # Errors out, changelog path not written
+        assert result.errors
+        assert any("already has entries" in e for e in result.errors)
+        assert result.changelog_path == ""
+
+        # Live entry is still there, untouched
+        changelog = (cfg.company_root / "knowledge" / "technical" / "platform-changelog.md").read_text()
+        assert "live entry" in changelog
+        assert "historical" not in changelog
+
+    def test_force_overwrites(self, aios_config):
+        from agent_os.config import Config
+
+        cfg = Config(company_root=aios_config.company_root, log_also_print=False)
+
+        write_update_notes(
+            previous_commit="a",
+            new_commit="b",
+            commit_subjects=["live entry"],
+            previous_version="0.2.0",
+            new_version="0.3.0",
+            config=cfg,
+        )
+
+        entries = [
+            BackfillEntry(
+                version="0.1.0",
+                previous_version="initial",
+                commit_subjects=["historical"],
+                timestamp="2026-01-01T00:00:00+00:00",
+            )
+        ]
+        result = write_backfill_notes(entries=entries, current_version="0.3.0", force=True, config=cfg)
+
+        assert result.errors == []
+        changelog = Path(result.changelog_path).read_text()
+        assert "historical" in changelog
+        # Live entry is gone — --force means what it says
+        assert "live entry" not in changelog
