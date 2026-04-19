@@ -4,6 +4,8 @@ agent-os is a file-based operating system for AI-native organizations. Everythin
 
 **This CLAUDE.md is for working on agent-os itself — the platform.** You're here to fix a bug, add a feature, refactor, write tests, or improve docs in the Python source, dashboard, or examples. If you're instead trying to *observe or operate* a running company that uses agent-os, you want that company's own workspace — its `CLAUDE.md` lives alongside its company directory, not here.
 
+> **First move when attached to a running company:** run `agent-os briefing` — it prints a dense, LLM-optimized markdown summary of operational state (budget, agents, tasks, drives, activity, health, attention flags). Designed to get a Claude Code session oriented in one screen. Add `--depth full` for more detail, `--agent <id>` to scope to one agent.
+
 ## Contributing
 
 `main` is branch-protected. Every change flows through a feature branch → PR → CI → review → merge. CI runs lint (`ruff check`, `ruff format --check`), the pytest suite on Python 3.11 and 3.12, a frontend build, and a wheel/sdist build. At least one approving review is required; force-pushes and direct pushes to `main` are blocked.
@@ -109,7 +111,10 @@ tests/            # pytest suite
 
 | File | What it does |
 |------|-------------|
-| `src/agent_os/cli.py` | All CLI commands: `init`, `new`, `status`, `cycle`, `run`, `cron`, `budget`, `task`, `drives`, `dream`, `standing-orders`, `dashboard` |
+| `src/agent_os/cli.py` | All CLI commands: `init`, `new`, `status`, `cycle`, `run`, `cron`, `budget`, `task`, `drives`, `dream`, `standing-orders`, `dashboard`, plus the CLI-first visibility commands (`briefing`, `agent`, `tasks`, `cost`, `health`, `timeline`, `messages`, `strategy`) and config mutations (`budget-set`, `autonomy`, `schedule-toggle`) |
+| `src/agent_os/briefing.py` | `render_briefing()` — composes the LLM-optimized session-bootstrap summary |
+| `src/agent_os/metrics.py` | The 648-line health-scoring engine (autonomy/effectiveness/efficiency/governance/system-health), now platform-level rather than dashboard-local. Consumed by `briefing` and `health` |
+| `src/agent_os/formatting.py` | Shared formatting facade: `rich` tables/panels/markdown, `plotext` charts, `print_json`, `supports_color` — honors `NO_COLOR` and TTY detection |
 | `src/agent_os/config.py` | `Config` dataclass, `Config.from_toml()`, `Config.discover_toml()` — TOML schema definition |
 | `src/agent_os/runner.py` | `run_cycle()` — the main loop: check tasks, messages, threads, exit if idle. `_run_agent_with_workspace()` — workspace-aware task execution |
 | `src/agent_os/composer.py` | `build_system_prompt()` — builds the 4-layer attention prompt (workspace-aware) |
