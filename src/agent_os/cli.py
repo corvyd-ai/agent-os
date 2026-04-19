@@ -1173,6 +1173,23 @@ def cmd_cron(args):
             print("Not installed. Run 'agent-os cron install' to set up.")
 
 
+# --- briefing command ---
+
+
+def cmd_briefing(args):
+    """Render the LLM-optimized session-bootstrap briefing to stdout."""
+    _set_root(args)
+    from .briefing import render_briefing
+    from .config import get_config
+
+    output = render_briefing(
+        get_config(),
+        depth=getattr(args, "depth", "short"),
+        agent=getattr(args, "agent", None),
+    )
+    print(output)
+
+
 # --- dashboard command ---
 
 
@@ -1235,7 +1252,11 @@ def _add_common_args(parser):
 # --- main entry point ---
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argparse parser.
+
+    Extracted so tests can introspect the command surface without running it.
+    """
     parser = argparse.ArgumentParser(
         prog="agent-os",
         description="The open-source operations layer for AI agents.",
@@ -1432,6 +1453,26 @@ def main():
     _add_common_args(p_dash)
     p_dash.set_defaults(func=cmd_dashboard)
 
+    # briefing — LLM-optimized session bootstrap summary
+    p_brief = subparsers.add_parser(
+        "briefing",
+        help="Print a dense, LLM-optimized summary of company state (run this first in a Claude session)",
+    )
+    p_brief.add_argument(
+        "--depth",
+        choices=["short", "full"],
+        default="short",
+        help="Briefing depth (short keeps it to one screen; full expands per-section detail)",
+    )
+    p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
+    _add_common_args(p_brief)
+    p_brief.set_defaults(func=cmd_briefing)
+
+    return parser
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
 
     if not args.command:
