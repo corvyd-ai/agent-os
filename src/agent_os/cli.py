@@ -1173,6 +1173,57 @@ def cmd_cron(args):
             print("Not installed. Run 'agent-os cron install' to set up.")
 
 
+# --- budget-set / autonomy / schedule-toggle (config mutations) ---
+
+
+def _discover_toml_path(args) -> Path:
+    """Locate agent-os.toml the same way `_set_root` does, but return the path."""
+    from .config import Config as _Cfg
+
+    config_path = getattr(args, "config", None)
+    root = getattr(args, "root", None)
+    if config_path:
+        return Path(config_path)
+    discovered = _Cfg.discover_toml(Path(root).resolve() if root else None)
+    if discovered is None:
+        print("Error: could not find agent-os.toml.", file=sys.stderr)
+        sys.exit(1)
+    return discovered
+
+
+def cmd_budget_set(args):
+    from .write_cmds import set_budget_caps
+
+    toml = _discover_toml_path(args)
+    set_budget_caps(toml, daily=args.daily, weekly=args.weekly, monthly=args.monthly)
+    print(f"Updated budget caps in {toml}.")
+
+
+def cmd_autonomy(args):
+    from .write_cmds import set_agent_autonomy
+
+    toml = _discover_toml_path(args)
+    try:
+        set_agent_autonomy(toml, args.agent_id, args.level)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Set {args.agent_id} autonomy to {args.level} in {toml}.")
+
+
+def cmd_schedule_toggle(args):
+    from .write_cmds import toggle_schedule
+
+    toml = _discover_toml_path(args)
+    enabled = args.state == "on"
+    try:
+        toggle_schedule(toml, args.kind, enabled)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Set {args.kind} to {'on' if enabled else 'off'} in {toml}.")
+
+
 # --- timeline / messages / strategy (read-only inspection) ---
 
 
@@ -1587,6 +1638,36 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
     _add_common_args(p_brief)
     p_brief.set_defaults(func=cmd_briefing)
+
+    # budget-set — mutate agent-os.toml budget caps
+    p_budget_set = subparsers.add_parser(
+        "budget-set", help="Update daily/weekly/monthly budget caps in agent-os.toml"
+    )
+    p_budget_set.add_argument("--daily", type=float, default=None, help="New daily cap in USD")
+    p_budget_set.add_argument("--weekly", type=float, default=None, help="New weekly cap in USD")
+    p_budget_set.add_argument("--monthly", type=float, default=None, help="New monthly cap in USD")
+    _add_common_args(p_budget_set)
+    p_budget_set.set_defaults(func=cmd_budget_set)
+
+    # autonomy — set per-agent autonomy level
+    p_autonomy = subparsers.add_parser("autonomy", help="Set per-agent autonomy level")
+    p_autonomy.add_argument("agent_id")
+    p_autonomy.add_argument("level", choices=["low", "medium", "high"])
+    _add_common_args(p_autonomy)
+    p_autonomy.set_defaults(func=cmd_autonomy)
+
+    # schedule-toggle — flip scheduler master switch or sub-feature
+    p_sched_tog = subparsers.add_parser(
+        "schedule-toggle", help="Flip the scheduler master switch or a sub-feature"
+    )
+    p_sched_tog.add_argument(
+        "kind",
+        choices=["scheduler", "cycles", "standing-orders", "drives", "dreams"],
+        help="Which scheduler feature to toggle",
+    )
+    p_sched_tog.add_argument("state", choices=["on", "off"])
+    _add_common_args(p_sched_tog)
+    p_sched_tog.set_defaults(func=cmd_schedule_toggle)
 
     # timeline — merged activity feed for a day
     p_timeline = subparsers.add_parser("timeline", help="Show merged activity log for a day")
