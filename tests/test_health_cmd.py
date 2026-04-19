@@ -113,7 +113,13 @@ def test_cli_health_json_flag(capsys, aios_config: Config):
     args = type(
         "Args",
         (),
-        {"format": "json", "agent": None, "days": 7, "root": None, "config": None},
+        {
+            "format": "json",
+            "agent": None,
+            "days": 7,
+            "root": str(aios_config.company_root),
+            "config": None,
+        },
     )()
 
     configure(aios_config)
@@ -125,3 +131,5 @@ def test_cli_health_json_flag(capsys, aios_config: Config):
     captured = capsys.readouterr()
     parsed = json.loads(captured.out)
     assert "agents" in parsed
+    # Tighten: the seeded agent should actually appear.
+    assert "agent-001-maker" in parsed["agents"]

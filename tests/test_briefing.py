@@ -418,7 +418,7 @@ def test_cmd_briefing_prints_markdown(aios_config: Config, capsys):
     args = type(
         "Args",
         (),
-        {"depth": "short", "agent": None, "root": None, "config": None},
+        {"depth": "short", "agent": None, "root": str(aios_config.company_root), "config": None},
     )()
 
     # cmd_briefing must accept our aios_config via the Config singleton. Patch it.
