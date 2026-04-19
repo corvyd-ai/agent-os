@@ -1173,6 +1173,24 @@ def cmd_cron(args):
             print("Not installed. Run 'agent-os cron install' to set up.")
 
 
+# --- cost command ---
+
+
+def cmd_cost(args):
+    """Spend rollup — total, per-agent, per-task-type."""
+    _set_root(args)
+    from .config import get_config
+    from .cost_cmd import render_cost, render_cost_json
+
+    cfg = get_config()
+    days = getattr(args, "days", 7)
+
+    if getattr(args, "format", "human") == "json":
+        print(render_cost_json(cfg, days=days))
+    else:
+        print(render_cost(cfg, days=days, by=getattr(args, "by", "agent")))
+
+
 # --- health command ---
 
 
@@ -1486,6 +1504,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
     _add_common_args(p_brief)
     p_brief.set_defaults(func=cmd_briefing)
+
+    # cost — spend rollup
+    p_cost = subparsers.add_parser("cost", help="Show spend totals by day, agent, and task type")
+    p_cost.add_argument("--days", type=int, default=7, help="Window in days (default: 7)")
+    p_cost.add_argument(
+        "--by", choices=["agent", "task-type"], default="agent", help="Breakdown dimension for human mode"
+    )
+    p_cost.add_argument("--format", choices=["human", "json"], default="human", help="Output format")
+    _add_common_args(p_cost)
+    p_cost.set_defaults(func=cmd_cost)
 
     # health — per-agent + system health scores
     p_health = subparsers.add_parser("health", help="Show per-agent and system health scores")
