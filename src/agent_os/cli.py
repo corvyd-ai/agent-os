@@ -1173,6 +1173,29 @@ def cmd_cron(args):
             print("Not installed. Run 'agent-os cron install' to set up.")
 
 
+# --- tasks command (plural — inspection, distinct from `task` runner) ---
+
+
+def cmd_tasks(args):
+    """Dispatch `agent-os tasks {list,show}`."""
+    _set_root(args)
+    from .config import get_config
+    from .task_cmd import render_task_list, render_task_list_json, render_task_show
+
+    cfg = get_config()
+    action = getattr(args, "tasks_action", None)
+    if action == "list":
+        if getattr(args, "format", "human") == "json":
+            print(render_task_list_json(cfg, status=getattr(args, "status", None), agent=getattr(args, "agent", None)))
+        else:
+            print(render_task_list(cfg, status=getattr(args, "status", None), agent=getattr(args, "agent", None)))
+    elif action == "show":
+        print(render_task_show(cfg, args.task_id))
+    else:
+        print("Usage: agent-os tasks {list|show <task-id>}")
+        sys.exit(1)
+
+
 # --- agent command ---
 
 
@@ -1527,6 +1550,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--agent", default=None, help="Scope the briefing to a single agent id")
     _add_common_args(p_brief)
     p_brief.set_defaults(func=cmd_briefing)
+
+    # tasks (plural) — read-only task inspection. Distinct from the `task`
+    # runner command which executes a specific task for an agent.
+    p_tasks = subparsers.add_parser("tasks", help="List or show tasks (inspection, not execution)")
+    tasks_sub = p_tasks.add_subparsers(dest="tasks_action")
+
+    p_tasks_list = tasks_sub.add_parser("list", help="List tasks (optionally filtered)")
+    p_tasks_list.add_argument("--status", default=None, help="Filter by status (queued, in-progress, done, ...)")
+    p_tasks_list.add_argument("--agent", default=None, help="Filter by assigned agent")
+    p_tasks_list.add_argument("--format", choices=["human", "json"], default="human")
+    _add_common_args(p_tasks_list)
+
+    p_tasks_show = tasks_sub.add_parser("show", help="Show full detail for one task")
+    p_tasks_show.add_argument("task_id", help="Task id")
+    _add_common_args(p_tasks_show)
+
+    p_tasks.set_defaults(func=cmd_tasks)
 
     # agent — inspect agents
     p_agent = subparsers.add_parser("agent", help="List or show registered agents")
