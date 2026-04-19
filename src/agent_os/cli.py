@@ -766,6 +766,163 @@ def cmd_digest(args):
         print(f"\nDigest written to: {result.digest_path}")
 
 
+# --- project command ---
+
+
+def cmd_project(args):
+    """Dispatch for `agent-os project <action>`."""
+    action = getattr(args, "project_action", None)
+    if action == "check":
+        return cmd_project_check(args)
+    if action == "init":
+        return cmd_project_init(args)
+    print("Usage: agent-os project {check|init}", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_project_check(args):
+    """Run project-readiness diagnostics."""
+    _set_root(args)
+    from .project import run_project_check
+
+    use_color = not getattr(args, "no_color", False) and sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+    def _color(text: str, code: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if use_color else text
+
+    status_icons = {
+        "ok": _color("[OK]     ", "32"),
+        "warning": _color("[WARNING]", "33"),
+        "error": _color("[ERROR]  ", "31"),
+        "skipped": _color("[SKIP]   ", "2"),
+    }
+
+    result = run_project_check()
+    print()
+    print("agent-os project check")
+    print("=" * 40)
+    print()
+    for check in result.checks:
+        icon = status_icons.get(check.status, "[???]    ")
+        print(f"  {icon}  {check.name}")
+        if check.detail:
+            print(f"             {check.detail}")
+        if check.fix:
+            print(f"             Fix: {check.fix}")
+        print()
+
+    summary = f"  {result.ok} passed, {result.warnings} warning(s), {result.errors} error(s)"
+    print(summary)
+    print()
+    sys.exit(1 if result.errors else 0)
+
+
+def cmd_project_init(args):
+    """Interactive bootstrap of the workspace SDLC config."""
+    _set_root(args)
+    from .config import Config, get_config
+    from .project import (
+        ensure_worktrees_gitignored,
+        run_project_check,
+        ssh_setup_instructions,
+        write_project_config,
+    )
+
+    if getattr(args, "ssh_help", False):
+        # Short-circuit: just print SSH setup guidance, don't do anything else
+        cfg = get_config()
+        print(ssh_setup_instructions(cfg))
+        return
+
+    cfg = get_config()
+    toml_path = _find_toml_path(args)
+
+    if cfg.project_enabled:
+        print(f"[project] section already configured in {toml_path}.")
+        print("Running `agent-os project check` to show current state:\n")
+        return cmd_project_check(args)
+
+    print()
+    print(f"Configuring the workspace SDLC for {cfg.company_name}.")
+    print(f"Config file: {toml_path}")
+    print()
+    print("Agents will work in isolated git worktrees. agent-os will commit")
+    print("and push for them — agents never run git commands.")
+    print()
+
+    yes = getattr(args, "yes", False)
+
+    def ask(prompt: str, default: str) -> str:
+        if yes:
+            return default
+        try:
+            answer = input(f"{prompt} [{default}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(1)
+        return answer or default
+
+    def ask_list(prompt: str, default: list[str]) -> list[str]:
+        default_str = ", ".join(default) if default else ""
+        if yes:
+            return default
+        try:
+            answer = input(f"{prompt} [{default_str}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(1)
+        if not answer:
+            return default
+        return [c.strip() for c in answer.split(",") if c.strip()]
+
+    default_branch = ask("Default branch", "main")
+    setup_commands = ask_list("Setup commands (comma-separated)", [])
+    validate_commands = ask_list("Validate commands (comma-separated)", [])
+
+    print()
+    print("Writing [project] config...")
+    try:
+        write_project_config(
+            toml_path,
+            default_branch=default_branch,
+            setup_commands=setup_commands,
+            validate_commands=validate_commands,
+        )
+        print(f"  ✓ {toml_path}")
+    except (FileNotFoundError, ValueError) as e:
+        print(f"  ✗ {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Reload config so downstream checks see the new [project] section
+    cfg = Config.from_toml(toml_path)
+
+    if ensure_worktrees_gitignored(cfg):
+        print(f"  ✓ Added {cfg.project_worktrees_dir}/ to {cfg.repo_root}/.gitignore")
+
+    # Run readiness check against the new config
+    print()
+    print("Running readiness check against the new config...")
+    print()
+    result = run_project_check(config=cfg)
+    for check in result.checks:
+        icon = {"ok": "✓", "warning": "!", "error": "✗", "skipped": "·"}.get(check.status, "?")
+        print(f"  {icon} {check.name}: {check.detail}")
+
+    auth_failed = any(
+        c.status == "error" and c.name == "Remote reachable" and "ls-remote failed" in c.detail for c in result.checks
+    )
+    if auth_failed:
+        print()
+        print("Push authentication is not yet configured. Guidance follows:")
+        print(ssh_setup_instructions(cfg))
+    elif result.errors:
+        print()
+        print(f"{result.errors} error(s) remaining. Re-run `agent-os project check` after fixing.")
+    else:
+        print()
+        print("All checks passed. The workspace SDLC is ready.")
+
+
 # --- cron command ---
 
 _CRON_MARKER = "# agent-os-tick"
@@ -1056,6 +1213,22 @@ def main():
     p_digest = subparsers.add_parser("digest", help="Generate health digest")
     _add_common_args(p_digest)
     p_digest.set_defaults(func=cmd_digest)
+
+    # project
+    p_project = subparsers.add_parser("project", help="Onboard a repo for the workspace SDLC")
+    _add_common_args(p_project)
+    project_sub = p_project.add_subparsers(dest="project_action")
+
+    p_project_check = project_sub.add_parser("check", help="Run project-readiness diagnostics")
+    p_project_check.add_argument("--no-color", action="store_true")
+    _add_common_args(p_project_check)
+
+    p_project_init = project_sub.add_parser("init", help="Interactively configure the workspace SDLC")
+    p_project_init.add_argument("-y", "--yes", action="store_true", help="Use defaults non-interactively")
+    p_project_init.add_argument("--ssh-help", action="store_true", help="Print SSH deploy-key setup steps and exit")
+    _add_common_args(p_project_init)
+
+    p_project.set_defaults(func=cmd_project)
 
     # update
     p_update = subparsers.add_parser("update", help="Self-update agent-os from git")
