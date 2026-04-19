@@ -93,6 +93,18 @@ If the `[project]` section in `agent-os.toml` has `validate.commands` or `setup.
 
 Then agents work directly in the company root with no git lifecycle. This is fine for non-code work. If you try to do code work in this mode, there is no automation — but that's also not the expected use case. Ask the operator to configure `[project]`.
 
+### Onboarding a repo (for the operator)
+
+Setting up the workspace SDLC on a new host is a few manual steps — SSH deploy key, `[project]` config, `.gitignore` entry, verification. agent-os has a command for this:
+
+- `agent-os project init` — interactive bootstrap: asks for default branch, setup/validate commands, writes the `[project]` section, adds `.worktrees/` to `.gitignore`.
+- `agent-os project check` — diagnostic: verifies remote reachability, push auth, default branch existence, setup/validate commands are runnable, `.worktrees/` is ignored.
+- `agent-os project init --ssh-help` — prints deploy-key setup instructions (doesn't auto-generate keys; too many host-specific choices).
+
+### Push failures
+
+If a push fails (e.g., the deploy key is missing or expired), agent-os logs the error at ERROR level, sends a **critical notification** (`event_type: workspace_push_failed`), and still completes the task locally. The commit is in the agent branch on-disk but not on the remote. Fix push auth (`agent-os project check` shows the specific problem), and future tasks will push normally. If you need to recover the unpushed commits, they're on the `agent/{task-id}` branch in the repo.
+
 ---
 
 ## Messaging
@@ -150,6 +162,8 @@ You don't interact with the scheduler directly. It invokes you; you check for wo
 | `agent-os dashboard` | Launch the web dashboard |
 | `agent-os doctor` | Diagnose platform health issues |
 | `agent-os digest` | Generate daily health digest |
+| `agent-os project init` | Bootstrap the workspace SDLC (remote, branches, gitignore) |
+| `agent-os project check` | Diagnose project-readiness (push auth, default branch, setup/validate commands) |
 | `agent-os budget` | Show budget status |
 | `agent-os backlog promote <task-id>` | Promote backlog → queued |
 | `agent-os archive` | Run archive maintenance |

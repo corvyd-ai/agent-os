@@ -804,12 +804,32 @@ async def _run_agent_with_workspace(
             if push_ok:
                 log.info("workspace_pushed", f"Pushed {workspace.branch}", {"task_id": task_id})
             else:
-                log.warn(
+                # Push failure is non-fatal for THIS task (the commit is in
+                # the agent branch locally), but if nothing ever pushes, work
+                # piles up invisibly. Fire a critical notification so the
+                # human notices now, not when they finally check `git log`.
+                log.error(
                     "workspace_push_failed",
                     f"Push failed (non-fatal): {push_output[:200]}",
-                    {
-                        "task_id": task_id,
-                    },
+                    {"task_id": task_id, "branch": workspace.branch},
+                )
+                from .notifications import NotificationEvent, send_notification
+
+                send_notification(
+                    NotificationEvent(
+                        event_type="workspace_push_failed",
+                        severity="critical",
+                        title=f"Push failed for task {task_id}",
+                        detail=(
+                            f"Branch `{workspace.branch}` was committed locally but the push to remote failed. "
+                            f"Work will pile up in the repo until push auth is fixed.\n\n"
+                            f"Error:\n{push_output[:400]}\n\n"
+                            f"Diagnose with: agent-os project check"
+                        ),
+                        agent_id=agent_config.agent_id,
+                        refs={"task_id": task_id, "branch": workspace.branch},
+                    ),
+                    config=cfg,
                 )
         else:
             log.info("workspace_no_changes", "No code changes to commit", {"task_id": task_id})

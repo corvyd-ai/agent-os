@@ -185,7 +185,19 @@ max_retries = 2
 6. `git add -A && git commit` with an auto-generated message, then `git push` to remote
 7. Task moves to `done/`, worktree is removed
 
-Branch naming is deterministic (`agent/{task-id}`). Push failures are non-fatal — work is committed locally either way. Agents without `[project]` configured work directly in `company_root` with no git lifecycle.
+Branch naming is deterministic (`agent/{task-id}`). Push failures are non-fatal for the task (commit stays on the local agent branch), but they fire a critical notification so you're not left with commits piling up invisibly. Agents without `[project]` configured work directly in `company_root` with no git lifecycle.
+
+### Onboarding a repo
+
+Setting up the workspace SDLC end-to-end takes a few steps (SSH deploy key, `[project]` config, `.gitignore` entry, verification). Two CLI commands handle it:
+
+```bash
+agent-os project init            # interactive bootstrap — writes [project] config, updates .gitignore
+agent-os project init --ssh-help # just print deploy-key setup instructions
+agent-os project check           # diagnostic: remote reachable? push auth? default branch? setup/validate runnable?
+```
+
+`project init` does not auto-generate SSH keys — key location, naming, and the runtime user are too host-specific. It tells you exactly what to generate and where to paste the public key, then verifies the result.
 
 ## Observability
 
