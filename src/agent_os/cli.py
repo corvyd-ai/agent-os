@@ -425,8 +425,10 @@ def cmd_schedule(args):
 def cmd_budget(args):
     """Show budget status with progress bars."""
     _set_root(args)
+    _require_config_source(args, "agent-os budget")
     from .budget import format_budget_report
 
+    print(f"Config: {args._config_source_path}")
     print(format_budget_report())
 
 
@@ -1443,24 +1445,44 @@ def cmd_dashboard(args):
 
 
 def _set_root(args):
-    """Set up Config from --config TOML file, --root flag, or defaults."""
+    """Set up Config from --config TOML file, --root flag, or defaults.
+
+    Records the resolved config source on ``args._config_source_kind`` and
+    ``args._config_source_path`` so safety-sensitive commands (e.g. `budget`)
+    can surface the provenance in their output and refuse to operate on
+    accidental defaults. Kind is one of ``"explicit"``, ``"discovered"``,
+    or ``"defaults"``.
+    """
     from .config import Config, configure, load_dotenv
 
     config_path = getattr(args, "config", None)
     root = getattr(args, "root", None)
 
+    source_kind: str
+    source_path: Path | None
+
     if config_path:
         # Explicit TOML file
+        toml_path = Path(config_path).resolve()
         cfg = Config.from_toml(Path(config_path))
+        source_kind = "explicit"
+        source_path = toml_path
     else:
         # Try TOML discovery
         toml_path = Config.discover_toml(Path(root).resolve() if root else None)
         if toml_path:
             cfg = Config.from_toml(toml_path)
+            source_kind = "discovered"
+            source_path = toml_path.resolve()
         else:
             # Fallback to root-only config
             resolved = Path(root).resolve() if root else Path.cwd()
             cfg = Config(company_root=resolved)
+            source_kind = "defaults"
+            source_path = None
+
+    args._config_source_kind = source_kind
+    args._config_source_path = source_path
 
     # Load .env from project root (before anything checks env vars)
     load_dotenv(cfg.company_root)
@@ -1468,6 +1490,33 @@ def _set_root(args):
     # Also set env var for any subprocess that might need it
     os.environ["AGENT_OS_ROOT"] = str(cfg.company_root)
     configure(cfg)
+
+
+def _require_config_source(args, command: str) -> None:
+    """Exit non-zero if no agent-os.toml was discovered.
+
+    Use this for commands whose safety depends on reading the same values
+    the scheduler writes (budget caps, cost ledger). If the CLI falls back
+    to defaults, those commands would report values unrelated to the
+    running deployment — e.g. `$0.00 / $100.00` on a company whose real
+    scheduler-state.json shows `$13.22 / $75.00`. Better to fail loudly.
+    """
+    if getattr(args, "_config_source_kind", None) == "defaults":
+        print(
+            f"ERROR: no agent-os.toml discovered — {command} refuses to run "
+            "on default caps and costs.\n"
+            "\n"
+            "The CLI must read the same config the scheduler writes, otherwise "
+            "budget numbers and circuit-breaker state are unrelated to the "
+            "running deployment.\n"
+            "\n"
+            "Options:\n"
+            "  - Run from inside a directory that has (or is under) an agent-os.toml\n"
+            "  - Pass --config /path/to/agent-os.toml\n"
+            "  - Set AGENT_OS_CONFIG=/path/to/agent-os.toml in the environment",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def _add_config_args(parser):
