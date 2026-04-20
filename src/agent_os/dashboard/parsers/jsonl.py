@@ -1,35 +1,27 @@
-"""Parse JSONL log and cost files."""
+"""Shim — parsers moved to agent_os.parsers in phase 1 of the CLI-first rework."""
 
-import json
+from __future__ import annotations
+
 from datetime import timedelta
 from pathlib import Path
 
-from ..config import company_date
+from agent_os.parsers.jsonl import parse_jsonl_file
 
-
-def parse_jsonl_file(path: Path) -> list[dict]:
-    """Parse all entries from a JSONL file."""
-    if not path.exists():
-        return []
-    entries = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if line:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return entries
+__all__ = ["parse_jsonl_file", "parse_jsonl_files"]
 
 
 def parse_jsonl_files(directory: Path, days: int = 7) -> list[dict]:
     """Parse JSONL files from the last N days in a directory.
 
-    Assumes files are named YYYY-MM-DD.jsonl.
+    Kept here for backward compatibility with dashboard routers; the new
+    canonical location is agent_os.parsers.jsonl, which intentionally omits
+    this helper since no external caller uses it.
     """
+    from ..config import company_date
+
     if not directory.exists():
         return []
-    entries = []
+    entries: list[dict] = []
     today = company_date()
     for i in range(days):
         date = today - timedelta(days=i)
