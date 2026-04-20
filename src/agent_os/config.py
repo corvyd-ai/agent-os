@@ -169,6 +169,16 @@ class Config:
     project_validate_on_failure: str = "retry"  # "fail" or "retry"
     project_validate_max_retries: int = 2
 
+    # Commit identity — injected inline (`git -c user.email=... commit ...`) so
+    # workspace commits succeed on runtimes where `git config --global
+    # user.email` was never set. Empty strings mean "fall through to whatever
+    # the runtime's git config happens to provide" (legacy behavior).
+    # Per-agent override lets commit history distinguish work by specific
+    # agents: {"agent-001-maker": {"email": "...", "name": "..."}}.
+    project_commit_author_email: str = ""
+    project_commit_author_name: str = ""
+    project_agent_commit_authors: dict[str, dict[str, str]] = field(default_factory=dict)
+
     # --- Budget & turn limits (per-invocation) ---
 
     # Standard task invocation
@@ -435,6 +445,18 @@ class Config:
             kwargs["project_validate_on_failure"] = validate["on_failure"]
         if "max_retries" in validate:
             kwargs["project_validate_max_retries"] = int(validate["max_retries"])
+
+        # [project.commit]
+        commit = project.get("commit", {})
+        if "author_email" in commit:
+            kwargs["project_commit_author_email"] = str(commit["author_email"])
+        if "author_name" in commit:
+            kwargs["project_commit_author_name"] = str(commit["author_name"])
+        agent_authors = commit.get("agent_authors", {})
+        if agent_authors:
+            kwargs["project_agent_commit_authors"] = {
+                agent_id: dict(v) for agent_id, v in agent_authors.items()
+            }
 
         return cls(**kwargs)
 

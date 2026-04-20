@@ -243,6 +243,157 @@ class TestCommitWorkspace:
         cleanup_workspace(ws, delete_branch=True, config=project_config)
 
 
+# ── commit identity injection (bug 1: Corvyd Apr 19 incident) ────────
+
+
+@pytest.fixture
+def unidentified_git_repo(tmp_path, monkeypatch):
+    """A git repo with NO user.email / user.name anywhere (global, system, or
+    local). Simulates a fresh runtime (e.g. the Hetzner `corvyd` account)
+    where `git commit` would fail with 'Author identity unknown' unless the
+    workspace provides inline `-c user.email=... -c user.name=...`.
+    """
+    # Isolate git from the host's global config for the duration of the test.
+    isolated_home = tmp_path / "home"
+    isolated_home.mkdir()
+    monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(isolated_home / "nonexistent-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(isolated_home / "nonexistent-systemconfig"))
+    # Also clear any env-var identity the parent shell may have had set.
+    for var in ("GIT_AUTHOR_EMAIL", "GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_NAME"):
+        monkeypatch.delenv(var, raising=False)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Bootstrap with a temporary local identity so the initial commit exists,
+    # then scrub it — subsequent commits should fail without our inline fix.
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "init@test"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Init"], cwd=str(repo), capture_output=True, check=True)
+    (repo / "README.md").write_text("# Test\n")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "config", "--unset", "user.email"], cwd=str(repo), capture_output=True, check=True)
+    subprocess.run(["git", "config", "--unset", "user.name"], cwd=str(repo), capture_output=True, check=True)
+    return repo
+
+
+def _tree(company_root):
+    for sub in ("queued", "in-progress", "done", "failed", "backlog", "declined", "in-review"):
+        (company_root / "agents" / "tasks" / sub).mkdir(parents=True, exist_ok=True)
+
+
+def test_commit_fails_without_identity_config(unidentified_git_repo, tmp_path):
+    """Baseline: when nothing sets a git identity, commit_workspace still
+    fails. This pins the failure mode from the incident so a regression in
+    the fallback path is visible."""
+    from agent_os.workspace import WorkspaceError
+
+    _tree(unidentified_git_repo)
+    cfg = Config(
+        company_root=unidentified_git_repo,
+        project_repo_path=".",
+        project_default_branch="main",
+        project_push=False,
+        project_validate_commands=["true"],
+        project_worktrees_dir=str(tmp_path / "worktrees"),
+    )
+    ws = create_workspace("task-identity-001", config=cfg)
+    (ws.worktree_path / "x.txt").write_text("hi")
+
+    with pytest.raises(WorkspaceError, match="identity|author"):
+        commit_workspace(ws, {"id": "task-identity-001", "title": "t"}, "agent-001", config=cfg)
+    cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+
+def test_commit_succeeds_with_project_level_identity(unidentified_git_repo, tmp_path):
+    """commit_workspace must succeed on a runtime with no git identity set,
+    as long as agent-os.toml provides one. Regression for the Corvyd
+    Apr 19 incident."""
+    _tree(unidentified_git_repo)
+    cfg = Config(
+        company_root=unidentified_git_repo,
+        project_repo_path=".",
+        project_default_branch="main",
+        project_push=False,
+        project_validate_commands=["true"],
+        project_worktrees_dir=str(tmp_path / "worktrees"),
+        project_commit_author_email="agent-os@example.com",
+        project_commit_author_name="Agent OS",
+    )
+    ws = create_workspace("task-identity-002", config=cfg)
+    (ws.worktree_path / "x.txt").write_text("hi")
+
+    sha = commit_workspace(ws, {"id": "task-identity-002", "title": "t"}, "agent-001", config=cfg)
+    assert sha is not None
+
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>"],
+        cwd=str(ws.worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    assert "Agent OS <agent-os@example.com>" in result.stdout
+    cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+
+def test_per_agent_identity_override_wins(unidentified_git_repo, tmp_path):
+    """Per-agent override lets commit history attribute work to the specific
+    agent even when a project-wide default exists."""
+    _tree(unidentified_git_repo)
+    cfg = Config(
+        company_root=unidentified_git_repo,
+        project_repo_path=".",
+        project_default_branch="main",
+        project_push=False,
+        project_validate_commands=["true"],
+        project_worktrees_dir=str(tmp_path / "worktrees"),
+        project_commit_author_email="default@example.com",
+        project_commit_author_name="Default",
+        project_agent_commit_authors={
+            "agent-002-maker": {"email": "maker@example.com", "name": "The Maker"},
+        },
+    )
+    ws = create_workspace("task-identity-003", config=cfg)
+    (ws.worktree_path / "x.txt").write_text("hi")
+
+    commit_workspace(ws, {"id": "task-identity-003", "title": "t"}, "agent-002-maker", config=cfg)
+
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>"],
+        cwd=str(ws.worktree_path),
+        capture_output=True,
+        text=True,
+    )
+    assert "The Maker <maker@example.com>" in result.stdout
+    cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+
+def test_identity_config_parsed_from_toml(tmp_path):
+    """[project.commit] section in agent-os.toml populates the Config fields."""
+    toml = tmp_path / "agent-os.toml"
+    toml.write_text(
+        """
+[company]
+name = "Test"
+
+[project.commit]
+author_email = "bot@example.com"
+author_name = "Bot"
+
+[project.commit.agent_authors.agent-001-maker]
+email = "maker@example.com"
+name = "Maker"
+"""
+    )
+    cfg = Config.from_toml(toml)
+    assert cfg.project_commit_author_email == "bot@example.com"
+    assert cfg.project_commit_author_name == "Bot"
+    assert cfg.project_agent_commit_authors == {
+        "agent-001-maker": {"email": "maker@example.com", "name": "Maker"},
+    }
+
+
 # ── push_workspace ───────────────────────────────────────────────────
 
 
