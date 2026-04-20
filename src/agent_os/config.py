@@ -454,9 +454,7 @@ class Config:
             kwargs["project_commit_author_name"] = str(commit["author_name"])
         agent_authors = commit.get("agent_authors", {})
         if agent_authors:
-            kwargs["project_agent_commit_authors"] = {
-                agent_id: dict(v) for agent_id, v in agent_authors.items()
-            }
+            kwargs["project_agent_commit_authors"] = {agent_id: dict(v) for agent_id, v in agent_authors.items()}
 
         return cls(**kwargs)
 

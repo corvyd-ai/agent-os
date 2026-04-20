@@ -301,7 +301,7 @@ def test_commit_fails_without_identity_config(unidentified_git_repo, tmp_path):
     ws = create_workspace("task-identity-001", config=cfg)
     (ws.worktree_path / "x.txt").write_text("hi")
 
-    with pytest.raises(WorkspaceError, match="identity|author"):
+    with pytest.raises(WorkspaceError, match=r"identity|author"):
         commit_workspace(ws, {"id": "task-identity-001", "title": "t"}, "agent-001", config=cfg)
     cleanup_workspace(ws, delete_branch=True, config=cfg)
 
