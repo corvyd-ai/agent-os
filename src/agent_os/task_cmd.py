@@ -80,6 +80,11 @@ def render_task_list_json(
     return json.dumps(slim, indent=2, default=_json_default)
 
 
+def task_exists(config: Config, task_id: str) -> bool:
+    """True if `task_id` is found in any status directory."""
+    return any(row["id"] == task_id or row["_path"].endswith(f"/{task_id}.md") for row in _collect_tasks(config))
+
+
 def render_task_show(config: Config, task_id: str) -> str:
     for row in _collect_tasks(config):
         if row["id"] == task_id or row["_path"].endswith(f"/{task_id}.md"):
