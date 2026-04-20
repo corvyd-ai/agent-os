@@ -324,9 +324,7 @@ def test_governance_exact_score(aios_config: Config):
         (aios_config.decisions_dir / f"{did}.md").write_text(f"---\nid: {did}\ndate: {today}\n---\n")
 
     aios_config.threads_dir.mkdir(parents=True, exist_ok=True)
-    (aios_config.threads_dir / "thread-resolved.md").write_text(
-        "---\nid: thread-resolved\nstatus: resolved\n---\n"
-    )
+    (aios_config.threads_dir / "thread-resolved.md").write_text("---\nid: thread-resolved\nstatus: resolved\n---\n")
     (aios_config.threads_dir / "thread-active.md").write_text(
         "---\nid: thread-active\nstatus: active\n---\n\n"
         "## agent-001-maker — 2026-04-19T10:00:00+00:00\n\nfirst.\n\n---\n\n"
