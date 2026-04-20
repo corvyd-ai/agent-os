@@ -183,6 +183,12 @@ def fail_task(
 ) -> Path | None:
     """Move a task to failed/ and append failure reason.
 
+    Searches in-progress/ first, then done/ and in-review/ as a backstop:
+    if some other code path (an MCP tool, a dashboard control) already
+    promoted the task before a downstream failure (e.g. the workspace
+    commit/push step), we still want the final state to reflect the failure
+    rather than silently leaving a "success" in done/.
+
     Args:
         task_id: The task ID to fail.
         reason: Human-readable failure reason.
@@ -192,10 +198,13 @@ def fail_task(
         config: Optional Config override.
     """
     cfg = config or get_config()
-    candidates = list(cfg.tasks_in_progress.glob(f"{task_id}*"))
-    if not candidates:
+    for source in (cfg.tasks_in_progress, cfg.tasks_done, cfg.tasks_in_review):
+        candidates = list(source.glob(f"{task_id}*"))
+        if candidates:
+            task_file = candidates[0]
+            break
+    else:
         return None
-    task_file = candidates[0]
 
     meta, body = _parse_frontmatter(task_file)
     meta["status"] = "failed"

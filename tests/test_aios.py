@@ -223,6 +223,64 @@ def test_fail_task_outcome_cancelled(aios_fs):
     assert meta["outcome"] == "cancelled"
 
 
+def test_fail_task_backstop_from_done(aios_fs):
+    """Regression: if a task was already moved to done/ (e.g. by a premature
+    MCP complete_task call) and a downstream step then fails, fail_task must
+    still relocate the task to failed/ and rewrite the outcome.
+
+    Without this backstop, a commit-phase failure in workspace mode would
+    silently leave the task in done/ with outcome: success, producing an
+    observability lie — dashboards, watchdogs, and the agent's next cycle
+    would all see "success" even though work was lost.
+    """
+    _create_task(aios_fs["TASKS_QUEUED"], "task-2026-0101-001", assigned_to="agent-001-maker")
+    claim_task("agent-001-maker", "task-2026-0101-001")
+    complete_task("task-2026-0101-001")  # simulates premature MCP complete_task
+
+    result = fail_task("task-2026-0101-001", "git commit failed: Author identity unknown")
+
+    assert result is not None
+    assert result.parent == aios_fs["TASKS_FAILED"]
+    meta, _ = _parse_frontmatter(result)
+    assert meta["status"] == "failed"
+    assert meta["outcome"] == "failure"
+    assert "git commit failed" in result.read_text()
+    # No stray copy left in done/
+    assert not list(aios_fs["TASKS_DONE"].glob("task-2026-0101-001*"))
+
+
+def test_fail_task_backstop_from_in_review(aios_fs):
+    """fail_task should also relocate from in-review/ if a downstream
+    failure occurs after submit_for_review."""
+    _create_task(aios_fs["TASKS_QUEUED"], "task-2026-0101-002", assigned_to="agent-001-maker")
+    claim_task("agent-001-maker", "task-2026-0101-002")
+    submit_for_review("task-2026-0101-002")
+
+    result = fail_task("task-2026-0101-002", "downstream failure")
+
+    assert result is not None
+    assert result.parent == aios_fs["TASKS_FAILED"]
+    assert not list(aios_fs["TASKS_IN_REVIEW"].glob("task-2026-0101-002*"))
+
+
+def test_fail_task_prefers_in_progress_over_done(aios_fs):
+    """If a task file somehow exists in both in-progress/ and done/ (this
+    shouldn't happen, but file systems are messy), fail the in-progress
+    copy — that's the one the runner is actively working on."""
+    _create_task(aios_fs["TASKS_IN_PROGRESS"], "task-2026-0101-003")
+    # Stray copy in done/ (pathological state)
+    _create_task(aios_fs["TASKS_DONE"], "task-2026-0101-003")
+
+    result = fail_task("task-2026-0101-003", "failed")
+
+    assert result is not None
+    assert result.parent == aios_fs["TASKS_FAILED"]
+    # in-progress/ copy was the one moved
+    assert not list(aios_fs["TASKS_IN_PROGRESS"].glob("task-2026-0101-003*"))
+    # done/ copy still there (untouched — fail_task only moves one)
+    assert list(aios_fs["TASKS_DONE"].glob("task-2026-0101-003*"))
+
+
 def test_submit_for_review(aios_fs):
     _create_task(aios_fs["TASKS_QUEUED"], "task-2026-0101-001", assigned_to="agent-001-maker")
     claim_task("agent-001-maker", "task-2026-0101-001")
