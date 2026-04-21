@@ -64,6 +64,51 @@ def update_toml(path: Path, section: str, updates: dict) -> None:
         _write_toml_fallback(path, data)
 
 
+def remove_toml_key(path: Path, section: str, key: str) -> bool:
+    """Remove a key from a section of agent-os.toml.
+
+    Returns True if the key was present and removed, False if it wasn't found
+    (missing section or missing key). Preserves comments/formatting via tomlkit.
+    """
+    try:
+        import tomlkit
+
+        content = path.read_text()
+        doc = tomlkit.parse(content)
+
+        parts = section.split(".")
+        target = doc
+        for part in parts:
+            if part not in target:
+                return False
+            target = target[part]
+
+        if key not in target:
+            return False
+        del target[key]
+        path.write_text(tomlkit.dumps(doc))
+        return True
+
+    except ImportError:
+        import tomllib
+
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+
+        parts = section.split(".")
+        target = data
+        for part in parts:
+            if part not in target:
+                return False
+            target = target[part]
+
+        if key not in target:
+            return False
+        del target[key]
+        _write_toml_fallback(path, data)
+        return True
+
+
 def _write_toml_fallback(path: Path, data: dict) -> None:
     """Write TOML data without tomlkit (loses comments)."""
     lines = []

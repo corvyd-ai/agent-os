@@ -311,3 +311,227 @@ def test_budget_explicit_config_shows_spend(tmp_path, monkeypatch, capsys):
     assert f"Config: {toml.resolve()}" in out
     assert "$1.23" in out
     assert "$75.00" in out
+
+
+# ── notifications command ──────────────────────────────────────────────
+
+
+def _write_notifications_toml(path):
+    path.write_text(
+        """
+[company]
+name = "Test"
+root = "."
+
+[notifications]
+enabled = true
+min_severity = "warning"
+""".lstrip()
+    )
+
+
+def _notif_args(config_path, **extra):
+    base = {"config": str(config_path), "root": None}
+    base.update(extra)
+    return SimpleNamespace(**base)
+
+
+def test_notifications_severity_persists(tmp_path, capsys):
+    from agent_os.cli import cmd_notifications_severity
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    cmd_notifications_severity(_notif_args(toml, level="critical"))
+    out = capsys.readouterr().out
+    assert "critical" in out
+
+    assert Config.from_toml(toml).notifications_min_severity == "critical"
+
+
+def test_notifications_event_set_and_clear(tmp_path, capsys):
+    from agent_os.cli import cmd_notifications_event
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    cmd_notifications_event(_notif_args(toml, event_type="message_for_human", severity="info"))
+    assert Config.from_toml(toml).notifications_event_overrides == {"message_for_human": "info"}
+
+    cmd_notifications_event(_notif_args(toml, event_type="message_for_human", severity="clear"))
+    out = capsys.readouterr().out
+    assert "Cleared override" in out
+    assert Config.from_toml(toml).notifications_event_overrides == {}
+
+
+def test_notifications_event_rejects_unknown_event(tmp_path, capsys):
+    from agent_os.cli import cmd_notifications_event
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cmd_notifications_event(_notif_args(toml, event_type="not_a_real_event", severity="info"))
+    assert excinfo.value.code == 1
+
+    err = capsys.readouterr().err
+    assert "Unknown event_type" in err
+
+
+def test_notifications_channel_toggle(tmp_path):
+    from agent_os.cli import cmd_notifications_channel
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    cmd_notifications_channel(_notif_args(toml, channel="desktop", state="on"))
+    assert Config.from_toml(toml).notifications_desktop is True
+
+    cmd_notifications_channel(_notif_args(toml, channel="desktop", state="off"))
+    assert Config.from_toml(toml).notifications_desktop is False
+
+
+def test_notifications_webhook_set_and_clear(tmp_path):
+    from agent_os.cli import cmd_notifications_webhook
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    cmd_notifications_webhook(_notif_args(toml, url="https://example.com/hook"))
+    assert Config.from_toml(toml).notifications_webhook_url == "https://example.com/hook"
+
+    cmd_notifications_webhook(_notif_args(toml, url="clear"))
+    assert Config.from_toml(toml).notifications_webhook_url == ""
+
+
+def test_notifications_enable_disable(tmp_path):
+    from agent_os.cli import cmd_notifications_set_enabled
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    cmd_notifications_set_enabled(_notif_args(toml), False)
+    assert Config.from_toml(toml).notifications_enabled is False
+
+    cmd_notifications_set_enabled(_notif_args(toml), True)
+    assert Config.from_toml(toml).notifications_enabled is True
+
+
+def test_notifications_status_renders(tmp_path, capsys):
+    from agent_os.cli import cmd_notifications_status
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    toml.write_text(
+        """
+[company]
+name = "Test"
+root = "."
+
+[notifications]
+enabled = true
+min_severity = "warning"
+desktop = true
+
+[notifications.events]
+message_for_human = "info"
+""".lstrip()
+    )
+
+    cmd_notifications_status(_notif_args(toml))
+    out = capsys.readouterr().out
+    assert "Enabled:" in out
+    assert "warning" in out
+    assert "desktop: on" in out
+    assert "message_for_human" in out
+    assert "info" in out
+
+
+def test_notifications_events_lists_known_types(tmp_path, capsys):
+    from agent_os.cli import cmd_notifications_events
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    cmd_notifications_events(_notif_args(toml))
+    out = capsys.readouterr().out
+    assert "preflight_failed" in out
+    assert "message_for_human" in out
+    assert "daily_digest" in out
+
+
+def test_notifications_test_fires_through_file_channel(tmp_path, capsys):
+    from agent_os.cli import cmd_notifications_test
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_notifications_toml(toml)
+
+    cmd_notifications_test(_notif_args(toml, event="test_event", severity="warning"))
+    out = capsys.readouterr().out
+    assert "Test notification dispatched" in out
+    assert "file" in out
+    notif_dir = company / "operations" / "notifications"
+    assert notif_dir.exists()
+    assert list(notif_dir.glob("*-test_event.md"))
+
+
+def test_notifications_test_refuses_when_disabled(tmp_path, capsys):
+    from agent_os.cli import cmd_notifications_test
+
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    toml.write_text(
+        """
+[company]
+name = "Test"
+root = "."
+
+[notifications]
+enabled = false
+""".lstrip()
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cmd_notifications_test(_notif_args(toml, event="test_event", severity="warning"))
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "disabled" in err
+
+
+def test_cli_registers_notifications_subcommands():
+    from agent_os.cli import _build_parser
+
+    parser = _build_parser()
+    for cmd in [
+        ["notifications", "status"],
+        ["notifications", "events"],
+        ["notifications", "enable"],
+        ["notifications", "disable"],
+        ["notifications", "severity", "info"],
+        ["notifications", "event", "message_for_human", "info"],
+        ["notifications", "channel", "file", "on"],
+        ["notifications", "webhook", "https://example.com/hook"],
+        ["notifications", "script", "clear"],
+        ["notifications", "test"],
+    ]:
+        args = parser.parse_args(cmd)
+        assert args.command == "notifications"
+        assert args.notif_action == cmd[1]

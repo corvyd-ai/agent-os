@@ -1244,6 +1244,212 @@ def cmd_schedule_toggle(args):
     print(f"Set {args.kind} to {'on' if enabled else 'off'} in {toml}.")
 
 
+# --- notifications (configure + test) -------------------------------
+
+
+def cmd_notifications(args):
+    """Dispatch `agent-os notifications <action>`."""
+    action = getattr(args, "notif_action", None)
+    dispatch = {
+        "status": cmd_notifications_status,
+        "events": cmd_notifications_events,
+        "enable": lambda a: cmd_notifications_set_enabled(a, True),
+        "disable": lambda a: cmd_notifications_set_enabled(a, False),
+        "severity": cmd_notifications_severity,
+        "event": cmd_notifications_event,
+        "channel": cmd_notifications_channel,
+        "webhook": cmd_notifications_webhook,
+        "script": cmd_notifications_script,
+        "test": cmd_notifications_test,
+    }
+    handler = dispatch.get(action)
+    if handler is None:
+        print(
+            "Error: missing subcommand.\n"
+            "Usage: agent-os notifications "
+            "{status|events|enable|disable|severity|event|channel|webhook|script|test}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return handler(args)
+
+
+def cmd_notifications_status(args):
+    """Print a readable summary of the current notification configuration."""
+    _set_root(args)
+    from .config import get_config
+    from .notifications import KNOWN_EVENT_TYPES
+
+    cfg = get_config()
+    toml = getattr(args, "_config_source_path", None)
+
+    def _on_off(b: bool) -> str:
+        return "on" if b else "off"
+
+    print("agent-os notifications")
+    print("=" * 40)
+    print(f"Enabled:             {_on_off(cfg.notifications_enabled)}")
+    print(f"Global min severity: {cfg.notifications_min_severity}")
+    print()
+    print("Channels:")
+    print(f"  file:    {_on_off(cfg.notifications_file)}")
+    print(f"  desktop: {_on_off(cfg.notifications_desktop)}")
+    webhook_note = cfg.notifications_webhook_url or "(no URL configured)"
+    print(f"  webhook: {webhook_note}")
+    script_note = cfg.notifications_script or "(no script configured)"
+    print(f"  script:  {script_note}")
+    print()
+    print("Per-event overrides:")
+    if not cfg.notifications_event_overrides:
+        print("  (none — all events use the global min severity)")
+    else:
+        width = max(len(k) for k in cfg.notifications_event_overrides)
+        for event_type, sev in sorted(cfg.notifications_event_overrides.items()):
+            marker = "" if event_type in KNOWN_EVENT_TYPES else "  [unknown event type]"
+            print(f"  {event_type.ljust(width)}  -> {sev}{marker}")
+    if toml:
+        print()
+        print(f"Config file: {toml}")
+
+
+def cmd_notifications_events(args):
+    """List known event types with their effective severity."""
+    _set_root(args)
+    from .config import get_config
+    from .notifications import KNOWN_EVENT_TYPES
+
+    cfg = get_config()
+    width = max(len(k) for k in KNOWN_EVENT_TYPES)
+    print("Known notification event types:")
+    print()
+    for event_type, description in KNOWN_EVENT_TYPES.items():
+        override = cfg.notifications_event_overrides.get(event_type)
+        effective = override or cfg.notifications_min_severity
+        tag = "[override]" if override else ""
+        print(f"  {event_type.ljust(width)}  ({effective:>8})  {description} {tag}".rstrip())
+    print()
+    print("Set an override with: agent-os notifications event <event_type> <info|warning|critical>")
+    print("Clear one with:      agent-os notifications event <event_type> clear")
+
+
+def cmd_notifications_set_enabled(args, enabled: bool):
+    from .write_cmds import set_notifications_enabled
+
+    toml = _discover_toml_path(args)
+    set_notifications_enabled(toml, enabled)
+    print(f"Notifications {'enabled' if enabled else 'disabled'} in {toml}.")
+
+
+def cmd_notifications_severity(args):
+    from .write_cmds import set_notifications_severity
+
+    toml = _discover_toml_path(args)
+    try:
+        set_notifications_severity(toml, args.level)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Set global notification min_severity to {args.level} in {toml}.")
+
+
+def cmd_notifications_event(args):
+    from .write_cmds import (
+        clear_notifications_event_override,
+        set_notifications_event_override,
+    )
+
+    toml = _discover_toml_path(args)
+    if args.severity == "clear":
+        removed = clear_notifications_event_override(toml, args.event_type)
+        if removed:
+            print(f"Cleared override for {args.event_type} in {toml}.")
+        else:
+            print(f"No override was set for {args.event_type}.")
+        return
+    try:
+        set_notifications_event_override(toml, args.event_type, args.severity)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Set {args.event_type} override to {args.severity} in {toml}.")
+
+
+def cmd_notifications_channel(args):
+    from .write_cmds import set_notifications_channel
+
+    toml = _discover_toml_path(args)
+    enabled = args.state == "on"
+    try:
+        set_notifications_channel(toml, args.channel, enabled)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Set {args.channel} channel to {'on' if enabled else 'off'} in {toml}.")
+
+
+def cmd_notifications_webhook(args):
+    from .write_cmds import set_notifications_webhook
+
+    toml = _discover_toml_path(args)
+    url = "" if args.url == "clear" else args.url
+    set_notifications_webhook(toml, url)
+    if url:
+        print(f"Set notification webhook URL in {toml}.")
+    else:
+        print(f"Cleared notification webhook URL in {toml}.")
+
+
+def cmd_notifications_script(args):
+    from .write_cmds import set_notifications_script
+
+    toml = _discover_toml_path(args)
+    path = "" if args.path == "clear" else args.path
+    set_notifications_script(toml, path)
+    if path:
+        print(f"Set notification script to {path} in {toml}.")
+    else:
+        print(f"Cleared notification script in {toml}.")
+
+
+def cmd_notifications_test(args):
+    """Fire a test notification through all configured channels."""
+    _set_root(args)
+    from .config import get_config
+    from .notifications import NotificationEvent, send_notification
+
+    cfg = get_config()
+    if not cfg.notifications_enabled:
+        print(
+            "Notifications are disabled. Run `agent-os notifications enable` first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    event_type = getattr(args, "event", None) or "test_event"
+    severity = getattr(args, "severity", None) or "warning"
+
+    event = NotificationEvent(
+        event_type=event_type,
+        severity=severity,
+        title=f"agent-os test notification ({event_type}, {severity})",
+        detail="This is a test notification dispatched via `agent-os notifications test`.",
+        agent_id="",
+    )
+    results = send_notification(event, config=cfg)
+    if not results:
+        print(
+            f"No channels dispatched. The event was filtered (severity={severity}, "
+            f"effective threshold="
+            f"{cfg.notifications_event_overrides.get(event_type, cfg.notifications_min_severity)})."
+        )
+        return
+
+    print("Test notification dispatched:")
+    for r in results:
+        status = "ok" if r.success else f"FAILED: {r.error}"
+        print(f"  {r.channel:<8} {status}")
+
+
 # --- timeline / messages / strategy (read-only inspection) ---
 
 
@@ -1834,6 +2040,87 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sched_tog.add_argument("state", choices=["on", "off"])
     _add_config_args(p_sched_tog)
     p_sched_tog.set_defaults(func=cmd_schedule_toggle)
+
+    # notifications — configure and test the notification system
+    p_notif = subparsers.add_parser(
+        "notifications",
+        help="Configure and test the notification system",
+    )
+    _add_config_args(p_notif)
+    notif_sub = p_notif.add_subparsers(dest="notif_action")
+
+    p_notif_status = notif_sub.add_parser("status", help="Show current notification configuration")
+    _add_config_args(p_notif_status)
+
+    p_notif_events = notif_sub.add_parser(
+        "events",
+        help="List known event types with their effective severity",
+    )
+    _add_config_args(p_notif_events)
+
+    p_notif_enable = notif_sub.add_parser("enable", help="Enable notifications globally")
+    _add_config_args(p_notif_enable)
+
+    p_notif_disable = notif_sub.add_parser("disable", help="Disable notifications globally")
+    _add_config_args(p_notif_disable)
+
+    p_notif_sev = notif_sub.add_parser("severity", help="Set the global minimum notification severity")
+    p_notif_sev.add_argument("level", choices=["info", "warning", "critical"])
+    _add_config_args(p_notif_sev)
+
+    p_notif_event = notif_sub.add_parser(
+        "event",
+        help="Set or clear a per-event-type severity override",
+    )
+    p_notif_event.add_argument(
+        "event_type",
+        help="Event type (run `agent-os notifications events` to list known types)",
+    )
+    p_notif_event.add_argument(
+        "severity",
+        help='Severity ("info", "warning", "critical") or "clear" to remove the override',
+    )
+    _add_config_args(p_notif_event)
+
+    p_notif_chan = notif_sub.add_parser(
+        "channel",
+        help="Toggle the file or desktop notification channel",
+    )
+    p_notif_chan.add_argument("channel", choices=["file", "desktop"])
+    p_notif_chan.add_argument("state", choices=["on", "off"])
+    _add_config_args(p_notif_chan)
+
+    p_notif_web = notif_sub.add_parser(
+        "webhook",
+        help="Set or clear the notification webhook URL",
+    )
+    p_notif_web.add_argument("url", help='Webhook URL, or "clear" to remove it')
+    _add_config_args(p_notif_web)
+
+    p_notif_script = notif_sub.add_parser(
+        "script",
+        help="Set or clear the notification script path",
+    )
+    p_notif_script.add_argument("path", help='Script path, or "clear" to remove it')
+    _add_config_args(p_notif_script)
+
+    p_notif_test = notif_sub.add_parser(
+        "test",
+        help="Fire a test notification through all configured channels",
+    )
+    p_notif_test.add_argument(
+        "--event",
+        default="test_event",
+        help="Event type to tag the test with (default: test_event)",
+    )
+    p_notif_test.add_argument(
+        "--severity",
+        choices=["info", "warning", "critical"],
+        default="warning",
+    )
+    _add_config_args(p_notif_test)
+
+    p_notif.set_defaults(func=cmd_notifications)
 
     # timeline — merged activity feed for a day
     p_timeline = subparsers.add_parser("timeline", help="Show merged activity log for a day")
