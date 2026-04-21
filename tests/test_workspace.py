@@ -11,7 +11,9 @@ from agent_os.workspace import (
     commit_workspace,
     create_workspace,
     get_workspace,
+    has_uncommitted_changes,
     push_workspace,
+    salvage_commit,
     setup_workspace,
     validate_workspace,
 )
@@ -392,6 +394,171 @@ name = "Maker"
     assert cfg.project_agent_commit_authors == {
         "agent-001-maker": {"email": "maker@example.com", "name": "Maker"},
     }
+
+
+# ── has_uncommitted_changes ──────────────────────────────────────────
+
+
+class TestHasUncommittedChanges:
+    def test_false_on_clean_worktree(self, project_config):
+        ws = create_workspace("task-hu-001", config=project_config)
+        assert has_uncommitted_changes(ws) is False
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_true_for_new_file(self, project_config):
+        ws = create_workspace("task-hu-002", config=project_config)
+        (ws.worktree_path / "new.txt").write_text("hello")
+        assert has_uncommitted_changes(ws) is True
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_true_for_modified_file(self, project_config):
+        ws = create_workspace("task-hu-003", config=project_config)
+        (ws.worktree_path / "README.md").write_text("# Modified\n")
+        assert has_uncommitted_changes(ws) is True
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_false_after_commit(self, project_config):
+        ws = create_workspace("task-hu-004", config=project_config)
+        (ws.worktree_path / "x.txt").write_text("x")
+        commit_workspace(ws, {"id": "task-hu-004", "title": "t"}, "agent-001", config=project_config)
+        assert has_uncommitted_changes(ws) is False
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+
+# ── salvage_commit ───────────────────────────────────────────────────
+
+
+class TestSalvageCommit:
+    def test_returns_none_on_clean_worktree(self, project_config):
+        ws = create_workspace("task-sc-001", config=project_config)
+        sha = salvage_commit(
+            ws,
+            {"id": "task-sc-001", "title": "Nothing to save"},
+            "agent-001",
+            "validation failed",
+            config=project_config,
+        )
+        assert sha is None
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_commits_uncommitted_changes(self, project_config):
+        ws = create_workspace("task-sc-002", config=project_config)
+        (ws.worktree_path / "partial.py").write_text("def half_done():\n    pass\n")
+
+        sha = salvage_commit(
+            ws,
+            {"id": "task-sc-002", "title": "Half-finished feature"},
+            "agent-007-builder",
+            "SDK timeout after 8 min",
+            config=project_config,
+        )
+        assert sha is not None
+        assert len(sha) == 40
+
+        # Verify message is flagged as salvage and includes the reason.
+        log_result = subprocess.run(
+            ["git", "log", "-1", "--format=%B"],
+            cwd=str(ws.worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        body = log_result.stdout
+        assert "SALVAGE" in body
+        assert "task-sc-002" in body
+        assert "SDK timeout after 8 min" in body
+        assert "agent-007-builder" in body
+
+        # And no uncommitted changes remain.
+        assert has_uncommitted_changes(ws) is False
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_includes_untracked_files(self, project_config):
+        """Salvage must stage untracked files too — agents often produce
+        brand-new files, not just edits, and losing them is the whole thing
+        we're trying to prevent."""
+        ws = create_workspace("task-sc-003", config=project_config)
+        (ws.worktree_path / "new_module.py").write_text("# new\n")
+
+        sha = salvage_commit(
+            ws,
+            {"id": "task-sc-003", "title": "Add module"},
+            "agent-001",
+            "agent error",
+            config=project_config,
+        )
+        assert sha is not None
+
+        ls_result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(ws.worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        assert "new_module.py" in ls_result.stdout
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_returns_none_when_identity_missing(self, unidentified_git_repo, tmp_path):
+        """Salvage swallows commit failures so exception handlers can decide
+        how to preserve work instead of double-failing on a missing git
+        identity. The runner then falls back to leaving the worktree on
+        disk."""
+        _tree(unidentified_git_repo)
+        cfg = Config(
+            company_root=unidentified_git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=False,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-sc-004", config=cfg)
+        (ws.worktree_path / "x.txt").write_text("x")
+
+        sha = salvage_commit(
+            ws,
+            {"id": "task-sc-004", "title": "t"},
+            "agent-001",
+            "SDK error",
+            config=cfg,
+        )
+        assert sha is None
+        # Work should still be present in the worktree (not deleted).
+        assert (ws.worktree_path / "x.txt").exists()
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_uses_configured_identity(self, unidentified_git_repo, tmp_path):
+        """Salvage applies the same per-project identity as normal commits."""
+        _tree(unidentified_git_repo)
+        cfg = Config(
+            company_root=unidentified_git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=False,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+            project_commit_author_email="bot@agent-os",
+            project_commit_author_name="agent-os bot",
+        )
+        ws = create_workspace("task-sc-005", config=cfg)
+        (ws.worktree_path / "x.txt").write_text("x")
+
+        sha = salvage_commit(
+            ws,
+            {"id": "task-sc-005", "title": "t"},
+            "agent-001",
+            "max_turns",
+            config=cfg,
+        )
+        assert sha is not None
+
+        log_result = subprocess.run(
+            ["git", "log", "-1", "--format=%an <%ae>"],
+            cwd=str(ws.worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        assert "agent-os bot <bot@agent-os>" in log_result.stdout
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
 
 
 # ── push_workspace ───────────────────────────────────────────────────

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import random
@@ -655,13 +656,25 @@ async def _run_agent_with_workspace(
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
 ) -> None:
-    """Workspace-aware task execution: worktree isolation, validation, commit, push."""
+    """Workspace-aware task execution: worktree isolation, validation, commit, push.
+
+    Failure policy: when the agent has produced uncommitted work and anything
+    downstream fails (SDK error, commit-phase error, uncaught exception), the
+    runner tries to salvage-commit the work so the branch preserves it. If the
+    salvage commit itself fails (e.g. broken git identity), the worktree is
+    left on disk for manual recovery rather than being deleted. The branch is
+    only deleted when we're certain no agent work was produced (setup-phase
+    failure, workspace-create failure).
+    """
+    from .notifications import NotificationEvent, send_notification
     from .workspace import (
         WorkspaceError,
         cleanup_workspace,
         commit_workspace,
         create_workspace,
+        has_uncommitted_changes,
         push_workspace,
+        salvage_commit,
         setup_workspace,
         validate_workspace,
     )
@@ -669,6 +682,103 @@ async def _run_agent_with_workspace(
     cfg = config
     log = get_logger(agent_config.agent_id)
     workspace = None
+
+    def _preserve_on_failure(reason: str) -> None:
+        """Best-effort work preservation after a failure.
+
+        Runs on every failure path that could have uncommitted agent work in
+        the worktree. Either salvage-commits the work (so the branch holds
+        it for review) or — if the commit itself fails — leaves the worktree
+        on disk and notifies the human.
+        """
+        if not workspace:
+            return
+
+        try:
+            had_changes = has_uncommitted_changes(workspace)
+        except Exception:
+            had_changes = False
+
+        if not had_changes:
+            # No agent work to preserve. Clean up entirely — both worktree
+            # and branch — since the branch would just be an empty pointer
+            # to the default branch head.
+            with contextlib.suppress(Exception):
+                cleanup_workspace(workspace, delete_branch=True, config=cfg)
+            return
+
+        salvaged_sha = None
+        with contextlib.suppress(Exception):
+            salvaged_sha = salvage_commit(
+                workspace,
+                task_meta,
+                agent_config.agent_id,
+                reason,
+                config=cfg,
+            )
+
+        if not salvaged_sha:
+            # Couldn't commit (e.g. missing git identity). Leave the worktree
+            # in place so the human can recover manually — deleting it now
+            # would throw away real agent work.
+            log.error(
+                "workspace_preserved",
+                f"Could not salvage-commit; worktree preserved at {workspace.worktree_path}",
+                {"task_id": task_id, "branch": workspace.branch, "reason": reason},
+            )
+            send_notification(
+                NotificationEvent(
+                    event_type="workspace_preserved",
+                    severity="critical",
+                    title=f"Worktree preserved for task {task_id} (could not salvage)",
+                    detail=(
+                        f"Task {task_id} failed ({reason}) with uncommitted agent work, "
+                        f"and the runner could not commit the work on its behalf. "
+                        f"The worktree has been left on disk for manual recovery.\n\n"
+                        f"Worktree: `{workspace.worktree_path}`\n"
+                        f"Branch:   `{workspace.branch}`\n\n"
+                        f"Recover with: `cd {workspace.worktree_path}` then stage / commit manually. "
+                        f"Most common cause: no git user.email / user.name configured."
+                    ),
+                    agent_id=agent_config.agent_id,
+                    refs={"task_id": task_id, "branch": workspace.branch, "worktree": str(workspace.worktree_path)},
+                ),
+                config=cfg,
+            )
+            return
+
+        log.warn(
+            "workspace_salvaged",
+            f"Salvaged partial work as {salvaged_sha[:8]} on {workspace.branch}",
+            {"task_id": task_id, "branch": workspace.branch, "sha": salvaged_sha, "reason": reason},
+        )
+
+        push_ok, push_output = True, ""
+        with contextlib.suppress(Exception):
+            push_ok, push_output = push_workspace(workspace, config=cfg)
+
+        send_notification(
+            NotificationEvent(
+                event_type="workspace_salvaged",
+                severity="warning",
+                title=f"Partial work preserved for task {task_id}",
+                detail=(
+                    f"Task {task_id} failed ({reason}) after the agent had made "
+                    f"changes. The runner created a salvage commit on branch "
+                    f"`{workspace.branch}` so the work isn't lost.\n\n"
+                    f"Commit: {salvaged_sha[:8]}\n"
+                    f"Push:   {'pushed to remote' if push_ok else 'local only — ' + push_output[:200]}\n\n"
+                    f"The commit is flagged SALVAGE in its message and has NOT been validated."
+                ),
+                agent_id=agent_config.agent_id,
+                refs={"task_id": task_id, "branch": workspace.branch, "sha": salvaged_sha},
+            ),
+            config=cfg,
+        )
+
+        # Branch preserves the salvage commit — remove only the worktree.
+        with contextlib.suppress(Exception):
+            cleanup_workspace(workspace, delete_branch=False, config=cfg)
 
     try:
         # --- Create workspace ---
@@ -687,6 +797,7 @@ async def _run_agent_with_workspace(
             if not ok:
                 log.error("workspace_setup_failed", "Setup commands failed", {"task_id": task_id})
                 aios.fail_task(task_id, f"Workspace setup failed:\n{setup_output[-2000:]}", config=cfg)
+                # Setup failed before the agent ran — no work to preserve.
                 cleanup_workspace(workspace, delete_branch=True, config=cfg)
                 return
 
@@ -714,6 +825,7 @@ async def _run_agent_with_workspace(
         # --- Execute with validation retry loop ---
         max_retries = cfg.project_validate_max_retries if cfg.project_validate_on_failure == "retry" else 0
         validate_output = ""
+        max_turns_exhausted = False  # Did the last SDK call end in error_max_turns?
 
         for attempt in range(max_retries + 1):
             if attempt > 0:
@@ -752,6 +864,8 @@ async def _run_agent_with_workspace(
                     max_retries=2,
                 )
 
+            max_turns_exhausted = False  # reset each attempt
+
             if result_msg:
                 cost = result_msg.total_cost_usd or 0.0
                 aios.log_cost(
@@ -770,14 +884,38 @@ async def _run_agent_with_workspace(
                         "task": task_id,
                         "cost_usd": cost,
                         "attempt": attempt,
+                        "subtype": result_msg.subtype,
                     },
                 )
 
                 if result_msg.is_error:
-                    aios.fail_task(task_id, result_msg.result or "Agent returned error", config=cfg)
-                    log.error("task_failed", f"Task {task_id} agent error", {"task_id": task_id})
-                    cleanup_workspace(workspace, delete_branch=True, config=cfg)
-                    return
+                    subtype = result_msg.subtype or ""
+                    if subtype == "error_max_turns":
+                        # Agent didn't finish under its own steam, but the
+                        # work in the worktree may still be valid. Fall
+                        # through to validation — if it passes, we'll submit
+                        # for review instead of marking done or failed.
+                        max_turns_exhausted = True
+                        log.warn(
+                            "sdk_max_turns",
+                            f"Agent hit turn limit ({result_msg.num_turns} turns) — validating partial work",
+                            {"task_id": task_id, "turns": result_msg.num_turns},
+                        )
+                    else:
+                        # Generic agent error — preserve any in-flight work.
+                        aios.fail_task(
+                            task_id,
+                            result_msg.result or f"Agent returned error (subtype={subtype})",
+                            error_refs={"subtype": subtype, "num_turns": result_msg.num_turns},
+                            config=cfg,
+                        )
+                        log.error(
+                            "task_failed",
+                            f"Task {task_id} agent error (subtype={subtype})",
+                            {"task_id": task_id, "subtype": subtype},
+                        )
+                        _preserve_on_failure(f"agent error: {subtype or 'unknown'}")
+                        return
 
             # --- Validate ---
             if cfg.project_validate_commands:
@@ -798,18 +936,31 @@ async def _run_agent_with_workspace(
             else:
                 break  # No validation commands — accept immediately
         else:
-            # All retries exhausted
+            # All retries exhausted — preserve the failing work so a human
+            # can see what broke instead of hunting through a deleted branch.
             aios.fail_task(
                 task_id,
                 f"Validation failed after {max_retries + 1} attempts:\n{validate_output[-2000:]}",
                 config=cfg,
             )
             log.error("workspace_validate_exhausted", "Validation retries exhausted", {"task_id": task_id})
-            cleanup_workspace(workspace, config=cfg)  # Keep branch for debugging
+            _preserve_on_failure(f"validation failed after {max_retries + 1} attempts")
             return
 
         # --- Commit + Push ---
-        sha = commit_workspace(workspace, task_meta, agent_config.agent_id, config=cfg)
+        try:
+            sha = commit_workspace(workspace, task_meta, agent_config.agent_id, config=cfg)
+        except WorkspaceError as e:
+            # Commit-phase failure: the agent's work is in the worktree but
+            # can't be committed (usually missing git identity). Preserve it.
+            log.error("workspace_commit_failed", f"Commit failed: {e}", {"task_id": task_id})
+            aios.fail_task(task_id, f"Commit failed: {e}", config=cfg)
+            _preserve_on_failure(f"commit failed: {e}")
+            from .circuit_breaker import evaluate_breaker
+
+            evaluate_breaker(agent_config.agent_id, config=cfg)
+            return
+
         if sha:
             log.info("workspace_committed", f"Committed {sha[:8]}", {"task_id": task_id, "sha": sha})
             push_ok, push_output = push_workspace(workspace, config=cfg)
@@ -825,8 +976,6 @@ async def _run_agent_with_workspace(
                     f"Push failed (non-fatal): {push_output[:200]}",
                     {"task_id": task_id, "branch": workspace.branch},
                 )
-                from .notifications import NotificationEvent, send_notification
-
                 send_notification(
                     NotificationEvent(
                         event_type="workspace_push_failed",
@@ -846,16 +995,46 @@ async def _run_agent_with_workspace(
         else:
             log.info("workspace_no_changes", "No code changes to commit", {"task_id": task_id})
 
-        # --- Complete task ---
-        aios.complete_task(task_id, config=cfg)
-        log.info("completed_task", f"Completed {task_id}", {"task_id": task_id, "branch": workspace.branch})
-        cleanup_workspace(workspace, config=cfg)
+        # --- Resolve task ---
+        if max_turns_exhausted:
+            # Work passed validation but the agent never signalled completion
+            # under its own control. Route to in-review so a human signs off
+            # rather than trusting the runner's inference.
+            aios.submit_for_review(task_id, config=cfg)
+            log.warn(
+                "task_submitted_for_review",
+                f"Task {task_id} hit turn limit but validation passed — submitted for review",
+                {"task_id": task_id, "branch": workspace.branch, "sha": sha},
+            )
+            send_notification(
+                NotificationEvent(
+                    event_type="task_submitted_for_review",
+                    severity="warning",
+                    title=f"Task {task_id} submitted for review (turn limit hit)",
+                    detail=(
+                        f"Task {task_id} ran out of turns but the resulting work passed "
+                        f"validation. The runner committed and submitted it for review "
+                        f"rather than marking it done — the agent did not explicitly "
+                        f"confirm completion.\n\n"
+                        f"Branch: `{workspace.branch}`\n"
+                        f"{f'Commit: {sha[:8]}' if sha else 'No code changes to commit'}\n\n"
+                        f"Review on the branch, then mark done or iterate."
+                    ),
+                    agent_id=agent_config.agent_id,
+                    refs={"task_id": task_id, "branch": workspace.branch, "sha": sha or ""},
+                ),
+                config=cfg,
+            )
+            cleanup_workspace(workspace, delete_branch=False, config=cfg)
+        else:
+            aios.complete_task(task_id, config=cfg)
+            log.info("completed_task", f"Completed {task_id}", {"task_id": task_id, "branch": workspace.branch})
+            cleanup_workspace(workspace, config=cfg)
 
     except WorkspaceError as e:
         log.error("workspace_error", str(e), {"task_id": task_id})
         aios.fail_task(task_id, f"Workspace error: {e}", config=cfg)
-        if workspace:
-            cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        _preserve_on_failure(f"workspace error: {e}")
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)
@@ -863,8 +1042,7 @@ async def _run_agent_with_workspace(
         error_detail = str(e)
         log.error("sdk_error", error_detail, {"task_id": task_id})
         aios.fail_task(task_id, error_detail, config=cfg)
-        if workspace:
-            cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        _preserve_on_failure(f"SDK error: {error_detail[:200]}")
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)
@@ -873,8 +1051,7 @@ async def _run_agent_with_workspace(
         error_detail = f"Workspace task error: {e}"
         log.error("workspace_task_error", error_detail, {"task_id": task_id})
         aios.fail_task(task_id, error_detail, config=cfg)
-        if workspace:
-            cleanup_workspace(workspace, delete_branch=True, config=cfg)
+        _preserve_on_failure(f"workspace task error: {str(e)[:200]}")
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)
