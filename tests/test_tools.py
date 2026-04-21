@@ -1,9 +1,10 @@
 """Tests for runtime.tools — MCP tool registration."""
 
 import asyncio
+import json
 
 from agent_os.core import _parse_frontmatter, _write_frontmatter, claim_task
-from agent_os.tools import AIOS_TOOL_NAMES, create_aios_tools_server
+from agent_os.tools import AIOS_TOOL_NAMES, build_aios_tools, create_aios_tools_server
 
 
 def test_all_tool_names_have_prefix():
@@ -20,6 +21,25 @@ def test_create_server_returns_without_error():
     assert server is not None
 
 
+def test_server_dict_is_json_safe_shape(aios_fs):
+    """Regression: every SDK invocation dies with "Object of type SdkMcpTool
+    is not JSON serializable" if we attach extra tool references to the
+    server dict. The SDK JSON-encodes this dict when handing mcp_servers to
+    the CLI subprocess, so only the canonical `{type, name, instance}` keys
+    from `create_sdk_mcp_server` are allowed — nothing else.
+    """
+    server = create_aios_tools_server(agent_id="agent-001-maker")
+    # Canonical shape from claude_agent_sdk.create_sdk_mcp_server — do not
+    # add keys here, even for "test convenience".
+    assert set(server.keys()) == {"type", "name", "instance"}
+    # The metadata subset (everything except the opaque `instance` object)
+    # must JSON-encode without raising. This is what the SDK actually does
+    # when spawning the CLI: instance is handled specially, the rest is
+    # serialized.
+    metadata = {k: v for k, v in server.items() if k != "instance"}
+    json.dumps(metadata)  # must not raise
+
+
 def _seed_in_progress_task(aios_fs, task_id):
     """Put a task directly into in-progress/ as if claim_task had run."""
     meta = {
@@ -33,16 +53,21 @@ def _seed_in_progress_task(aios_fs, task_id):
     claim_task("agent-001-maker", task_id)
 
 
+def _handler(tools, name):
+    for t in tools:
+        if t.name == name:
+            return t.handler
+    raise KeyError(name)
+
+
 def test_complete_task_tool_defer_mode_leaves_task_in_progress(aios_fs):
     """In workspace mode (defer_complete=True), the MCP complete_task tool
     acknowledges success but must NOT move the task out of in-progress/ —
     the runner takes over and finalizes only after commit/push succeed."""
     _seed_in_progress_task(aios_fs, "task-2026-0101-001")
 
-    server = create_aios_tools_server(agent_id="agent-001-maker", defer_complete=True)
-    handler = server["_tools"]["complete_task"].handler
-
-    response = asyncio.run(handler({"task_id": "task-2026-0101-001"}))
+    tools = build_aios_tools(agent_id="agent-001-maker", defer_complete=True)
+    response = asyncio.run(_handler(tools, "complete_task")({"task_id": "task-2026-0101-001"}))
 
     assert not response.get("is_error")
     # Task stays in in-progress/; nothing moved
@@ -59,10 +84,8 @@ def test_complete_task_tool_default_mode_moves_to_done(aios_fs):
     roles and companies without a [project] section."""
     _seed_in_progress_task(aios_fs, "task-2026-0101-002")
 
-    server = create_aios_tools_server(agent_id="agent-001-maker")
-    handler = server["_tools"]["complete_task"].handler
-
-    response = asyncio.run(handler({"task_id": "task-2026-0101-002"}))
+    tools = build_aios_tools(agent_id="agent-001-maker")
+    response = asyncio.run(_handler(tools, "complete_task")({"task_id": "task-2026-0101-002"}))
 
     assert not response.get("is_error")
     assert list(aios_fs["TASKS_DONE"].glob("task-2026-0101-002*"))

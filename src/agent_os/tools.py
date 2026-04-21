@@ -40,30 +40,21 @@ def _text_response(text: str, is_error: bool = False) -> dict:
     return resp
 
 
-def create_aios_tools_server(
+def build_aios_tools(
     agent_id: str,
     *,
     config: Config | None = None,
     defer_complete: bool = False,
-):
-    """Create an in-process MCP server with agent-os lifecycle tools.
+) -> list:
+    """Build the list of ``SdkMcpTool`` instances for a given agent.
 
-    Each invocation creates a fresh server that closes over the calling agent's
-    ID and config. This is cheap (in-process, no network) and ensures tools
-    always know which agent is invoking them.
+    Separated from ``create_aios_tools_server`` so tests can reach the raw
+    tool handlers without depending on any extra attributes on the server
+    config dict — the SDK serializes that dict to JSON when spinning up a
+    subprocess, and ``SdkMcpTool`` is not JSON-serializable, so anything
+    extra we stash on the returned dict breaks every real agent invocation.
 
-    Args:
-        agent_id: The full agent ID, e.g. "agent-001-maker"
-        config: Optional Config override (defaults to global singleton)
-        defer_complete: If True, complete_task acknowledges success but does
-            not move the task file. The runner is then the single authority
-            that finalizes the task after commit/push succeed. This prevents
-            an agent from prematurely marking a task done before downstream
-            steps (commit, push) have run — otherwise a commit failure would
-            land in the wrong directory and appear as success.
-
-    Returns:
-        McpSdkServerConfig ready to pass to ClaudeAgentOptions.mcp_servers
+    See ``create_aios_tools_server`` for parameter semantics.
     """
     cfg = config  # Closed over; None means aios functions use their own default
 
@@ -214,7 +205,7 @@ def create_aios_tools_server(
         except PermissionError as e:
             return _text_response(str(e), is_error=True)
 
-    tools = [
+    return [
         complete_task_tool,
         fail_task_tool,
         submit_for_review_tool,
@@ -223,8 +214,40 @@ def create_aios_tools_server(
         log_action_tool,
         create_task_tool,
     ]
-    server = create_sdk_mcp_server(name="aios", version="1.0.0", tools=tools)
-    # Attach the raw tool list to the config dict so tests and introspection
-    # can reach the handlers without round-tripping through the MCP protocol.
-    server["_tools"] = {t.name: t for t in tools}
-    return server
+
+
+def create_aios_tools_server(
+    agent_id: str,
+    *,
+    config: Config | None = None,
+    defer_complete: bool = False,
+):
+    """Create an in-process MCP server with agent-os lifecycle tools.
+
+    Each invocation creates a fresh server that closes over the calling agent's
+    ID and config. This is cheap (in-process, no network) and ensures tools
+    always know which agent is invoking them.
+
+    The returned dict is the canonical ``{type, name, instance}`` shape from
+    ``create_sdk_mcp_server`` — do not add extra keys. The SDK serializes
+    ``mcp_servers`` to JSON when handing it to the CLI subprocess, and
+    ``SdkMcpTool`` (or anything else not in the encoder's supported types)
+    will crash every real agent invocation with "Object of type SdkMcpTool is
+    not JSON serializable". Tests that need raw tool handlers should call
+    ``build_aios_tools`` directly.
+
+    Args:
+        agent_id: The full agent ID, e.g. "agent-001-maker"
+        config: Optional Config override (defaults to global singleton)
+        defer_complete: If True, complete_task acknowledges success but does
+            not move the task file. The runner is then the single authority
+            that finalizes the task after commit/push succeed. This prevents
+            an agent from prematurely marking a task done before downstream
+            steps (commit, push) have run — otherwise a commit failure would
+            land in the wrong directory and appear as success.
+
+    Returns:
+        McpSdkServerConfig ready to pass to ClaudeAgentOptions.mcp_servers
+    """
+    tools = build_aios_tools(agent_id, config=config, defer_complete=defer_complete)
+    return create_sdk_mcp_server(name="aios", version="1.0.0", tools=tools)
