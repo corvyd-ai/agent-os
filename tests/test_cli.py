@@ -1,5 +1,6 @@
 """Tests for CLI commands: init, update, agent-not-found handling."""
 
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_os.cli import INIT_DIRS, _find_repo_root, cmd_init, cmd_update
+from agent_os.cli import INIT_DIRS, _find_repo_root, cmd_budget, cmd_init, cmd_update
 from agent_os.config import Config
 
 # ── init command ────────────────────────────────────────────────────
@@ -212,3 +213,101 @@ def test_update_pulls_and_reinstalls(monkeypatch):
     # Should have run pip install
     pip_calls = [c for c in calls if c[0] != "git"]
     assert any("-m" in c and "pip" in c for c in pip_calls)
+
+
+# ── budget command config visibility (bug 3) ────────────────────────
+
+
+def _write_budget_toml(path, *, daily_cap: float):
+    # [company].root = "." is required so company_root resolves to the
+    # directory containing the TOML (rather than cwd at import time).
+    path.write_text(
+        f"""
+[company]
+name = "Test"
+root = "."
+
+[budget]
+daily_cap = {daily_cap}
+""".lstrip()
+    )
+
+
+def _log_cost(company_root, *, date: str, cost_usd: float):
+    """Append a single cost JSONL entry — same shape core.log_cost writes."""
+    costs_dir = company_root / "finance" / "costs"
+    costs_dir.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "date": date,
+        "agent": "agent-001-maker",
+        "task": "task-test",
+        "cost_usd": cost_usd,
+        "duration_ms": 100,
+        "model": "claude-opus-4-6",
+        "turns": 1,
+        "timestamp": f"{date}T00:00:00+00:00",
+    }
+    with (costs_dir / f"{date}.jsonl").open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def test_budget_prints_resolved_config_path(tmp_path, monkeypatch, capsys):
+    """Regression for the Corvyd Apr 19 discovery mismatch: budget CLI showed
+    $0/$100 while scheduler-state.json showed $13.22/$75 because the two
+    were discovering different agent-os.toml files. The first line of
+    `agent-os budget` output must now reveal which config got loaded, so an
+    operator (or agent) cross-checking numbers can see the source."""
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_budget_toml(toml, daily_cap=75.0)
+    monkeypatch.chdir(company)
+
+    cmd_budget(SimpleNamespace(config=None, root=None))
+    out = capsys.readouterr().out
+
+    assert f"Config: {toml.resolve()}" in out
+    assert "$75.00" in out  # configured cap, not the $100 default
+
+
+def test_budget_exits_nonzero_when_no_config_discovered(tmp_path, monkeypatch, capsys):
+    """Run from a directory that has no agent-os.toml anywhere up the chain.
+    The CLI must refuse rather than silently report default caps and $0
+    spend, which is the failure mode the incident revealed."""
+    # Ensure no env override bleeds in from the parent shell
+    monkeypatch.delenv("AGENT_OS_CONFIG", raising=False)
+    # And ensure the tmp_path isn't itself inside a tree with agent-os.toml
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cmd_budget(SimpleNamespace(config=None, root=str(empty)))
+    assert excinfo.value.code == 2
+
+    err = capsys.readouterr().err
+    assert "no agent-os.toml discovered" in err
+    assert "--config" in err
+
+
+def test_budget_explicit_config_shows_spend(tmp_path, monkeypatch, capsys):
+    """Smoke test per the bug report's ask: a logged cost must surface in
+    the budget CLI within one invocation — no caching, no stale files."""
+    company = tmp_path / "co"
+    company.mkdir()
+    toml = company / "agent-os.toml"
+    _write_budget_toml(toml, daily_cap=75.0)
+
+    # Log $1.23 for today (whatever "today" is in UTC for the test).
+    from datetime import UTC, datetime
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    _log_cost(company, date=today, cost_usd=1.23)
+
+    monkeypatch.chdir(tmp_path)  # avoid cwd discovery; use --config explicitly
+    cmd_budget(SimpleNamespace(config=str(toml), root=None))
+    out = capsys.readouterr().out
+
+    assert f"Config: {toml.resolve()}" in out
+    assert "$1.23" in out
+    assert "$75.00" in out

@@ -196,8 +196,15 @@ def _make_options(
     max_budget_usd: float | None = None,
     model: str | None = None,
     stderr_capture: StderrCapture | None = None,
+    defer_complete: bool = False,
 ) -> ClaudeAgentOptions:
-    """Build ClaudeAgentOptions with agent-os MCP tools injected."""
+    """Build ClaudeAgentOptions with agent-os MCP tools injected.
+
+    When ``defer_complete`` is True, the MCP ``complete_task`` tool becomes
+    a no-op ack — the runner is then the single authority that moves the
+    task to done/ after commit/push succeed. Used in workspace mode so a
+    commit-phase failure does not leave an early "success" in done/.
+    """
     cfg = config or get_config()
 
     prompt_bytes = len(system_prompt.encode("utf-8"))
@@ -209,7 +216,11 @@ def _make_options(
             {"bytes": prompt_bytes, "agent": agent_config.agent_id},
         )
 
-    aios_server = create_aios_tools_server(agent_id=agent_config.agent_id, config=cfg)
+    aios_server = create_aios_tools_server(
+        agent_id=agent_config.agent_id,
+        config=cfg,
+        defer_complete=defer_complete,
+    )
     opts_kwargs = dict(
         system_prompt=system_prompt,
         allowed_tools=agent_config.allowed_tools + AIOS_TOOL_NAMES,
@@ -697,6 +708,7 @@ async def _run_agent_with_workspace(
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
             stderr_capture=stderr_capture,
+            defer_complete=True,
         )
 
         # --- Execute with validation retry loop ---

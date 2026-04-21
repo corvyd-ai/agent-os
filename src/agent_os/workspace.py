@@ -194,6 +194,30 @@ def validate_workspace(
     )
 
 
+def _resolve_commit_identity(agent_id: str, cfg: Config) -> list[str]:
+    """Return `-c user.email=... -c user.name=...` overrides for `git commit`.
+
+    Looks up per-agent override first, then falls back to the project-level
+    default. Returns an empty list when nothing is configured — in that case
+    we defer to whatever the runtime's git config provides (legacy behavior).
+
+    We inject these as command-line overrides rather than writing to git
+    config so the setting is visible, scoped to a single commit, and cannot
+    silently drift with host state. This is the fix for the Corvyd Apr 19
+    incident where a fresh runtime had no user.email set and every commit
+    failed with "Author identity unknown".
+    """
+    agent_override = cfg.project_agent_commit_authors.get(agent_id) or {}
+    email = agent_override.get("email") or cfg.project_commit_author_email
+    name = agent_override.get("name") or cfg.project_commit_author_name
+    args: list[str] = []
+    if email:
+        args.extend(["-c", f"user.email={email}"])
+    if name:
+        args.extend(["-c", f"user.name={name}"])
+    return args
+
+
 def commit_workspace(
     workspace: Workspace,
     task_meta: dict,
@@ -202,6 +226,7 @@ def commit_workspace(
     config: Config | None = None,
 ) -> str | None:
     """Stage all changes and commit. Returns commit SHA or None if no changes."""
+    cfg = config or get_config()
     wt = workspace.worktree_path
 
     # Stage all changes
@@ -222,7 +247,8 @@ def commit_workspace(
     priority = task_meta.get("priority", "medium")
     message = f"[{task_id}] {title}\n\nAgent: {agent_id}\nTask: {task_id}\nPriority: {priority}"
 
-    _git(["commit", "-m", message], cwd=wt)
+    identity_args = _resolve_commit_identity(agent_id, cfg)
+    _git([*identity_args, "commit", "-m", message], cwd=wt)
 
     # Get the commit SHA
     sha_result = _git(["rev-parse", "HEAD"], cwd=wt)

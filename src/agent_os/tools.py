@@ -40,7 +40,12 @@ def _text_response(text: str, is_error: bool = False) -> dict:
     return resp
 
 
-def create_aios_tools_server(agent_id: str, *, config: Config | None = None):
+def create_aios_tools_server(
+    agent_id: str,
+    *,
+    config: Config | None = None,
+    defer_complete: bool = False,
+):
     """Create an in-process MCP server with agent-os lifecycle tools.
 
     Each invocation creates a fresh server that closes over the calling agent's
@@ -50,6 +55,12 @@ def create_aios_tools_server(agent_id: str, *, config: Config | None = None):
     Args:
         agent_id: The full agent ID, e.g. "agent-001-maker"
         config: Optional Config override (defaults to global singleton)
+        defer_complete: If True, complete_task acknowledges success but does
+            not move the task file. The runner is then the single authority
+            that finalizes the task after commit/push succeed. This prevents
+            an agent from prematurely marking a task done before downstream
+            steps (commit, push) have run — otherwise a commit failure would
+            land in the wrong directory and appear as success.
 
     Returns:
         McpSdkServerConfig ready to pass to ClaudeAgentOptions.mcp_servers
@@ -67,6 +78,17 @@ def create_aios_tools_server(agent_id: str, *, config: Config | None = None):
     )
     async def complete_task_tool(args):
         task_id = args["task_id"]
+        if defer_complete:
+            aios.log_action(
+                agent_id=agent_id,
+                action="complete_task_deferred",
+                detail=f"Agent requested completion of {task_id}; runner will finalize after commit/push.",
+                config=cfg,
+            )
+            return _text_response(
+                f"Task {task_id} marked complete. "
+                "The workspace runner will finalize (commit, push, move to done/) after you return."
+            )
         result = aios.complete_task(task_id, outcome="success", config=cfg)
         if result:
             return _text_response(f"Task {task_id} moved to done/ at {result}")
@@ -192,16 +214,17 @@ def create_aios_tools_server(agent_id: str, *, config: Config | None = None):
         except PermissionError as e:
             return _text_response(str(e), is_error=True)
 
-    return create_sdk_mcp_server(
-        name="aios",
-        version="1.0.0",
-        tools=[
-            complete_task_tool,
-            fail_task_tool,
-            submit_for_review_tool,
-            send_message_tool,
-            post_broadcast_tool,
-            log_action_tool,
-            create_task_tool,
-        ],
-    )
+    tools = [
+        complete_task_tool,
+        fail_task_tool,
+        submit_for_review_tool,
+        send_message_tool,
+        post_broadcast_tool,
+        log_action_tool,
+        create_task_tool,
+    ]
+    server = create_sdk_mcp_server(name="aios", version="1.0.0", tools=tools)
+    # Attach the raw tool list to the config dict so tests and introspection
+    # can reach the handlers without round-tripping through the MCP protocol.
+    server["_tools"] = {t.name: t for t in tools}
+    return server

@@ -198,6 +198,13 @@ commands = ["npm install"]
 commands = ["pytest", "ruff check ."]
 on_failure = "retry"
 max_retries = 2
+[project.commit]                 # Injected inline at commit time; no global
+author_email = "agent-os@example.com"   # git config needs to be set on the host
+author_name = "agent-os"
+# Optional per-agent attribution:
+# [project.commit.agent_authors.agent-001-maker]
+# email = "maker@example.com"
+# name   = "The Maker"
 
 [budget]
 task = 5.00
