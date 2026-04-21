@@ -137,6 +137,42 @@ root = "{toml_dir / "company"}"
         assert cfg.feedback_routing == {}
         assert cfg.prompts_override_dir is None
 
+    def test_notifications_event_overrides(self, toml_dir):
+        toml = _write_toml(
+            toml_dir,
+            """
+[company]
+root = "company"
+
+[notifications]
+min_severity = "warning"
+
+[notifications.events]
+message_for_human = "info"
+daily_digest = "critical"
+""",
+        )
+        cfg = Config.from_toml(toml)
+        assert cfg.notifications_min_severity == "warning"
+        assert cfg.notifications_event_overrides == {
+            "message_for_human": "info",
+            "daily_digest": "critical",
+        }
+
+    def test_notifications_no_event_overrides(self, toml_dir):
+        toml = _write_toml(
+            toml_dir,
+            """
+[company]
+root = "company"
+
+[notifications]
+min_severity = "info"
+""",
+        )
+        cfg = Config.from_toml(toml)
+        assert cfg.notifications_event_overrides == {}
+
 
 class TestDiscoverToml:
     def test_finds_toml_in_directory(self, tmp_path):

@@ -136,6 +136,10 @@ class Config:
     notifications_script: str = ""  # path to notification script
     notifications_file: bool = True  # always-on file-drop (default)
     notifications_min_severity: str = "warning"  # info, warning, critical
+    # Per-event-type min-severity overrides. Keys are event_type strings
+    # (see notifications.KNOWN_EVENT_TYPES). Values override the global
+    # min_severity for that event_type only.
+    notifications_event_overrides: dict[str, str] = field(default_factory=dict)
 
     # --- Failure circuit breaker ---
     circuit_breaker_enabled: bool = True
@@ -364,6 +368,10 @@ class Config:
             kwargs["notifications_file"] = bool(notif["file"])
         if "min_severity" in notif:
             kwargs["notifications_min_severity"] = notif["min_severity"]
+        # [notifications.events] — per-event-type min_severity overrides
+        events_overrides = notif.get("events", {})
+        if isinstance(events_overrides, dict) and events_overrides:
+            kwargs["notifications_event_overrides"] = {str(k): str(v) for k, v in events_overrides.items()}
 
         # [circuit_breaker]
         cb = data.get("circuit_breaker", {})

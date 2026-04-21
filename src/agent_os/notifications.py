@@ -38,11 +38,24 @@ SEVERITIES = ("info", "warning", "critical")
 _SEVERITY_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
 
 
+# Registry of all event types the platform emits. Used for CLI discoverability
+# (`agent-os notifications events`) and for validating per-event severity
+# overrides. When you add a new event_type, register it here.
+KNOWN_EVENT_TYPES: dict[str, str] = {
+    "preflight_failed": "Agent blocked by a pre-flight check (cannot claim tasks).",
+    "circuit_breaker_tripped": "Agent hit the consecutive-failure threshold and is cooling down.",
+    "workspace_push_failed": "Git push failed after completing a task. Work is committed locally.",
+    "watchdog_alert": "A scheduled agent hasn't run within its expected interval.",
+    "daily_digest": "Daily system health summary.",
+    "message_for_human": "An agent sent a message to the human inbox.",
+}
+
+
 @dataclass(frozen=True)
 class NotificationEvent:
     """A structured notification event."""
 
-    event_type: str  # "preflight_failed", "circuit_breaker_tripped", "budget_warning", "watchdog_alert", "daily_digest"
+    event_type: str  # "preflight_failed", "circuit_breaker_tripped", "budget_warning", "watchdog_alert", "daily_digest", "message_for_human"
     severity: str  # "info", "warning", "critical"
     title: str  # one-line summary
     detail: str  # full message body
@@ -233,7 +246,9 @@ def send_notification(
     if not cfg.notifications_enabled:
         return results
 
-    if not _meets_severity(event.severity, cfg.notifications_min_severity):
+    # Per-event override takes precedence over the global min_severity.
+    min_severity = cfg.notifications_event_overrides.get(event.event_type, cfg.notifications_min_severity)
+    if not _meets_severity(event.severity, min_severity):
         return results
 
     # File notifier (always-on default)
