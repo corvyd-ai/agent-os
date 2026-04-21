@@ -392,6 +392,60 @@ def test_mark_processed(aios_fs):
     assert processed_path.exists()
 
 
+def test_send_message_to_human_emits_notification(aios_fs):
+    send_message(
+        from_agent="agent-001-maker",
+        to_agent="human",
+        subject="Need your input",
+        body="Blocked on a decision.",
+        urgency="high",
+    )
+
+    notif_dir = aios_fs["COMPANY_ROOT"] / "operations" / "notifications"
+    assert notif_dir.exists()
+    files = list(notif_dir.glob("*-message_for_human.md"))
+    assert len(files) == 1
+
+    content = files[0].read_text()
+    assert "message_for_human" in content
+    assert "Message from agent-001-maker" in content
+    assert "Need your input" in content
+    assert "Blocked on a decision." in content
+    assert 'agent_id: "agent-001-maker"' in content
+
+
+def test_send_message_to_human_maps_urgency_to_severity(aios_fs):
+    send_message("agent-001-maker", "human", "Urgent", "The server is on fire.", urgency="critical")
+
+    notif_dir = aios_fs["COMPANY_ROOT"] / "operations" / "notifications"
+    files = list(notif_dir.glob("*-message_for_human.md"))
+    assert len(files) == 1
+    assert "severity: critical" in files[0].read_text()
+
+
+def test_send_message_to_human_response_requested_in_title(aios_fs):
+    send_message(
+        "agent-001-maker",
+        "human",
+        "Approve deploy?",
+        "Ready to ship.",
+        urgency="high",
+        requires_response=True,
+    )
+
+    notif_dir = aios_fs["COMPANY_ROOT"] / "operations" / "notifications"
+    files = list(notif_dir.glob("*-message_for_human.md"))
+    assert len(files) == 1
+    assert "[response requested]" in files[0].read_text()
+
+
+def test_send_message_between_agents_does_not_notify(aios_fs):
+    send_message("agent-000-steward", "agent-001-maker", "Hey", "Body", urgency="critical")
+
+    notif_dir = aios_fs["COMPANY_ROOT"] / "operations" / "notifications"
+    assert not notif_dir.exists() or not list(notif_dir.glob("*-message_for_human.md"))
+
+
 # ── Journals ──────────────────────────────────────────────────────────
 
 

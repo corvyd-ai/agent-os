@@ -111,6 +111,47 @@ class TestSendNotification:
         results = send_notification(event, config=cfg)
         assert results == []
 
+    def test_per_event_override_lowers_threshold(self, aios_config):
+        # Global threshold is critical, but message_for_human is overridden to info.
+        cfg = Config(
+            company_root=aios_config.company_root,
+            notifications_enabled=True,
+            notifications_file=True,
+            notifications_desktop=False,
+            notifications_min_severity="critical",
+            notifications_event_overrides={"message_for_human": "info"},
+        )
+        event = _make_event(event_type="message_for_human", severity="info")
+        results = send_notification(event, config=cfg)
+        assert len(results) == 1
+        assert results[0].channel == "file"
+
+    def test_per_event_override_raises_threshold(self, aios_config):
+        # Global threshold is info, but daily_digest is muted up to critical.
+        cfg = Config(
+            company_root=aios_config.company_root,
+            notifications_enabled=True,
+            notifications_min_severity="info",
+            notifications_event_overrides={"daily_digest": "critical"},
+        )
+        event = _make_event(event_type="daily_digest", severity="warning")
+        results = send_notification(event, config=cfg)
+        assert results == []
+
+    def test_per_event_override_does_not_affect_other_events(self, aios_config):
+        cfg = Config(
+            company_root=aios_config.company_root,
+            notifications_enabled=True,
+            notifications_file=True,
+            notifications_desktop=False,
+            notifications_min_severity="warning",
+            notifications_event_overrides={"daily_digest": "critical"},
+        )
+        # Non-overridden event still uses global threshold.
+        event = _make_event(event_type="preflight_failed", severity="warning")
+        results = send_notification(event, config=cfg)
+        assert len(results) == 1
+
     def test_logs_notification(self, aios_config):
         cfg = Config(
             company_root=aios_config.company_root,

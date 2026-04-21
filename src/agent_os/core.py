@@ -343,7 +343,50 @@ def send_message(
     outbox.mkdir(parents=True, exist_ok=True)
     _write_frontmatter(outbox / f"{msg_id}.md", meta, body)
 
+    if to_agent == "human":
+        _notify_message_for_human(meta, body, config=cfg)
+
     return msg_id
+
+
+def _notify_message_for_human(meta: dict, body: str, *, config: Config) -> None:
+    """Emit a notification when an agent sends a message to the human inbox.
+
+    Best-effort: any failure here must not affect message delivery.
+    """
+    try:
+        from .notifications import NotificationEvent, send_notification
+
+        urgency = str(meta.get("urgency", "normal"))
+        severity_map = {"normal": "info", "high": "warning", "critical": "critical"}
+        severity = severity_map.get(urgency, "info")
+
+        from_agent = str(meta.get("from", "unknown"))
+        subject = str(meta.get("subject", "(no subject)"))
+        requires_response = bool(meta.get("requires_response", False))
+
+        title = f"Message from {from_agent}: {subject}"
+        if requires_response:
+            title = f"[response requested] {title}"
+
+        send_notification(
+            NotificationEvent(
+                event_type="message_for_human",
+                severity=severity,
+                title=title,
+                detail=body,
+                agent_id=from_agent,
+                refs={
+                    "msg_id": meta.get("id", ""),
+                    "urgency": urgency,
+                    "requires_response": requires_response,
+                    "thread": meta.get("thread") or "",
+                },
+            ),
+            config=config,
+        )
+    except Exception:
+        pass
 
 
 def read_inbox(agent_id: str, *, config: Config | None = None) -> list[tuple[dict, str, Path]]:
