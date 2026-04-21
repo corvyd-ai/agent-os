@@ -255,6 +255,79 @@ def commit_workspace(
     return sha_result.stdout.strip()
 
 
+def has_uncommitted_changes(workspace: Workspace) -> bool:
+    """Return True if the worktree has staged, unstaged, or untracked changes.
+
+    Used on failure paths to decide whether the agent produced work worth
+    preserving before the runner cleans up. Best-effort — on git/OS failure
+    we return False so the caller falls through to the normal cleanup path.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(workspace.worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def salvage_commit(
+    workspace: Workspace,
+    task_meta: dict,
+    agent_id: str,
+    reason: str,
+    *,
+    config: Config | None = None,
+) -> str | None:
+    """Commit any uncommitted changes to preserve partial work after a failure.
+
+    The resulting commit is flagged as a SALVAGE in the message body so a
+    human reviewer can tell it apart from a normal task completion — the work
+    it captures was not validated and may not even build.
+
+    Returns the commit SHA, or None if there was nothing to commit or the
+    commit itself failed (e.g. missing git identity). Swallows WorkspaceError
+    because this runs from an already-failing path and must not re-raise.
+    """
+    cfg = config or get_config()
+    wt = workspace.worktree_path
+
+    try:
+        _git(["add", "-A"], cwd=wt)
+
+        diff_result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+        if diff_result.returncode == 0:
+            return None
+
+        task_id = task_meta.get("id", workspace.task_id)
+        title = task_meta.get("title", "Untitled task")
+        message = (
+            f"[{task_id}] SALVAGE: {title}\n\n"
+            f"Partial work preserved after: {reason}\n\n"
+            f"Agent: {agent_id}\n"
+            f"Task: {task_id}\n\n"
+            f"This commit was made by the agent-os runner to preserve "
+            f"in-progress work on a failure path. It has NOT been validated "
+            f"and likely needs human review before merging."
+        )
+
+        identity_args = _resolve_commit_identity(agent_id, cfg)
+        _git([*identity_args, "commit", "-m", message], cwd=wt)
+
+        sha_result = _git(["rev-parse", "HEAD"], cwd=wt)
+        return sha_result.stdout.strip()
+    except WorkspaceError:
+        return None
+
+
 def push_workspace(
     workspace: Workspace,
     *,
