@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .toml_writer import update_toml
+from .toml_writer import remove_toml_key, update_toml
 
 AUTONOMY_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 SCHEDULE_KINDS: tuple[str, ...] = ("scheduler", "cycles", "standing-orders", "drives", "dreams")
+NOTIFICATION_SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
+NOTIFICATION_CHANNELS: tuple[str, ...] = ("file", "desktop")
 
 
 def set_budget_caps(
@@ -58,3 +60,56 @@ def toggle_schedule(toml_path: Path, kind: str, enabled: bool) -> None:
     # The config schema uses plain names for cycles/standing-orders/drives/dreams.
     section_name = kind.replace("-", "_") if kind == "standing-orders" else kind
     update_toml(toml_path, f"schedule.{section_name}", {"enabled": bool(enabled)})
+
+
+# --- Notifications ---
+
+
+def set_notifications_enabled(toml_path: Path, enabled: bool) -> None:
+    """Flip the master notifications switch."""
+    update_toml(toml_path, "notifications", {"enabled": bool(enabled)})
+
+
+def set_notifications_severity(toml_path: Path, severity: str) -> None:
+    """Set the global minimum notification severity."""
+    if severity not in NOTIFICATION_SEVERITIES:
+        raise ValueError(f"Invalid severity: {severity!r}. Must be one of {NOTIFICATION_SEVERITIES}.")
+    update_toml(toml_path, "notifications", {"min_severity": severity})
+
+
+def set_notifications_channel(toml_path: Path, channel: str, enabled: bool) -> None:
+    """Toggle a notification channel (file or desktop)."""
+    if channel not in NOTIFICATION_CHANNELS:
+        raise ValueError(
+            f"Invalid channel: {channel!r}. Must be one of {NOTIFICATION_CHANNELS}. "
+            f"Use `notifications webhook`/`script` to configure those channels."
+        )
+    update_toml(toml_path, "notifications", {channel: bool(enabled)})
+
+
+def set_notifications_webhook(toml_path: Path, url: str) -> None:
+    """Set the webhook URL (empty string clears it)."""
+    update_toml(toml_path, "notifications", {"webhook_url": url})
+
+
+def set_notifications_script(toml_path: Path, script_path: str) -> None:
+    """Set the notification script path (empty string clears it)."""
+    update_toml(toml_path, "notifications", {"script": script_path})
+
+
+def set_notifications_event_override(toml_path: Path, event_type: str, severity: str) -> None:
+    """Set a per-event-type severity override under [notifications.events]."""
+    # Validate against the event registry.
+    from .notifications import KNOWN_EVENT_TYPES
+
+    if event_type not in KNOWN_EVENT_TYPES:
+        known = ", ".join(sorted(KNOWN_EVENT_TYPES))
+        raise ValueError(f"Unknown event_type: {event_type!r}. Known events: {known}.")
+    if severity not in NOTIFICATION_SEVERITIES:
+        raise ValueError(f"Invalid severity: {severity!r}. Must be one of {NOTIFICATION_SEVERITIES}.")
+    update_toml(toml_path, "notifications.events", {event_type: severity})
+
+
+def clear_notifications_event_override(toml_path: Path, event_type: str) -> bool:
+    """Remove a per-event-type override. Returns True if it existed."""
+    return remove_toml_key(toml_path, "notifications.events", event_type)

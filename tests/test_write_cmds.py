@@ -180,3 +180,122 @@ def test_cli_registers_schedule_toggle():
     assert args.command == "schedule-toggle"
     assert args.kind == "cycles"
     assert args.state == "off"
+
+
+# --------------------------------------------------------------------------
+# notifications
+# --------------------------------------------------------------------------
+
+
+def test_set_notifications_severity(toml_company):
+    from agent_os.write_cmds import set_notifications_severity
+
+    _, toml = toml_company
+    set_notifications_severity(toml, "critical")
+
+    reloaded = Config.from_toml(toml)
+    assert reloaded.notifications_min_severity == "critical"
+
+
+def test_set_notifications_severity_rejects_invalid(toml_company):
+    from agent_os.write_cmds import set_notifications_severity
+
+    _, toml = toml_company
+    with pytest.raises(ValueError):
+        set_notifications_severity(toml, "loud")
+
+
+def test_set_notifications_channel(toml_company):
+    from agent_os.write_cmds import set_notifications_channel
+
+    _, toml = toml_company
+    set_notifications_channel(toml, "desktop", True)
+    assert Config.from_toml(toml).notifications_desktop is True
+
+    set_notifications_channel(toml, "desktop", False)
+    assert Config.from_toml(toml).notifications_desktop is False
+
+
+def test_set_notifications_channel_rejects_webhook_name(toml_company):
+    from agent_os.write_cmds import set_notifications_channel
+
+    _, toml = toml_company
+    with pytest.raises(ValueError):
+        set_notifications_channel(toml, "webhook", True)
+
+
+def test_set_notifications_webhook(toml_company):
+    from agent_os.write_cmds import set_notifications_webhook
+
+    _, toml = toml_company
+    set_notifications_webhook(toml, "https://example.com/hook")
+    assert Config.from_toml(toml).notifications_webhook_url == "https://example.com/hook"
+
+    set_notifications_webhook(toml, "")
+    assert Config.from_toml(toml).notifications_webhook_url == ""
+
+
+def test_set_notifications_event_override(toml_company):
+    from agent_os.write_cmds import set_notifications_event_override
+
+    _, toml = toml_company
+    set_notifications_event_override(toml, "message_for_human", "info")
+    set_notifications_event_override(toml, "daily_digest", "critical")
+
+    reloaded = Config.from_toml(toml)
+    assert reloaded.notifications_event_overrides == {
+        "message_for_human": "info",
+        "daily_digest": "critical",
+    }
+
+
+def test_set_notifications_event_override_rejects_unknown_event(toml_company):
+    from agent_os.write_cmds import set_notifications_event_override
+
+    _, toml = toml_company
+    with pytest.raises(ValueError, match="Unknown event_type"):
+        set_notifications_event_override(toml, "made_up_event", "info")
+
+
+def test_set_notifications_event_override_rejects_invalid_severity(toml_company):
+    from agent_os.write_cmds import set_notifications_event_override
+
+    _, toml = toml_company
+    with pytest.raises(ValueError, match="Invalid severity"):
+        set_notifications_event_override(toml, "message_for_human", "loud")
+
+
+def test_clear_notifications_event_override(toml_company):
+    from agent_os.write_cmds import (
+        clear_notifications_event_override,
+        set_notifications_event_override,
+    )
+
+    _, toml = toml_company
+    set_notifications_event_override(toml, "message_for_human", "info")
+    set_notifications_event_override(toml, "daily_digest", "critical")
+
+    removed = clear_notifications_event_override(toml, "message_for_human")
+    assert removed is True
+
+    reloaded = Config.from_toml(toml)
+    assert reloaded.notifications_event_overrides == {"daily_digest": "critical"}
+
+
+def test_clear_notifications_event_override_missing_key(toml_company):
+    from agent_os.write_cmds import clear_notifications_event_override
+
+    _, toml = toml_company
+    # Section doesn't exist yet — should return False, not raise.
+    assert clear_notifications_event_override(toml, "message_for_human") is False
+
+
+def test_set_notifications_enabled(toml_company):
+    from agent_os.write_cmds import set_notifications_enabled
+
+    _, toml = toml_company
+    set_notifications_enabled(toml, False)
+    assert Config.from_toml(toml).notifications_enabled is False
+
+    set_notifications_enabled(toml, True)
+    assert Config.from_toml(toml).notifications_enabled is True
