@@ -69,7 +69,7 @@ When an agent with role `Software Engineer` (or any role in `builder_roles`) cla
 4. **Validation runs** — agent-os executes `[project.validate].commands` (e.g., `pytest`, `ruff check .`).
 5. **Retry (if configured)** — if validation fails and `on_failure = "retry"`, you get another turn with the error output. Fix it and continue.
 6. **agent-os commits and pushes** — `git add -A && git commit` with an auto-generated message, then `git push` to remote.
-7. **agent-os opens a pull request** — on GitHub remotes, agent-os runs `gh pr create` automatically (configurable; see `[project.pull_request]` in the config reference). On non-GitHub remotes, or if PR creation is disabled, this step is skipped with a log line explaining why.
+7. **agent-os composes a one-click PR URL** — on GitHub remotes, agent-os builds a pre-filled GitHub "compare" URL (with the task title and metadata populated as query params) and surfaces it in a `workspace_pr_ready` notification. Nothing is created on GitHub until a human clicks `Create pull request` in the browser. No external CLI, no API token — just URL-string assembly, same credentials as `git push`. Non-GitHub remotes are skipped with a log line.
 8. **Task completes** — moved to `done/`. The worktree is moved to `.worktrees/_archive/` (not deleted) so the files survive for forensics and cross-attempt comparison.
 
 ### What YOU do as an agent in workspace mode
@@ -106,9 +106,11 @@ Setting up the workspace SDLC on a new host is a few manual steps — SSH deploy
 
 If a push fails (e.g., the deploy key is missing or expired), agent-os logs the error at ERROR level, sends a **critical notification** (`event_type: workspace_push_failed`), and still completes the task locally. The commit is in the agent branch on-disk but not on the remote. Fix push auth (`agent-os project check` shows the specific problem), and future tasks will push normally. If you need to recover the unpushed commits, they're on the `agent/{task-id}` branch in the repo.
 
-### PR creation failures
+### PR URL is informational, not an action
 
-If push succeeds but `gh pr create` fails (e.g., `gh` isn't authenticated, or the GitHub API errors), agent-os logs at ERROR level, fires a **warning notification** (`event_type: workspace_pr_failed`), and **still marks the task done** — the branch is on the remote, so no work is lost. Humans can open the PR manually. If PR creation is *intentionally* disabled or the remote isn't GitHub, the step is skipped quietly with an info log (no notification).
+agent-os does not open PRs on your behalf. After push, it emits a `workspace_pr_ready` notification containing a pre-filled GitHub compare URL. A human clicks the link, reviews the pre-filled form, and hits `Create pull request`. This keeps the platform pure-git — no `gh` CLI, no GitHub API token, no extra auth — and trivially portable: the same function shape can emit compare URLs for GitLab/Bitbucket/Gitea/etc. by swapping in a different URL builder.
+
+If the remote isn't GitHub, the step is skipped with an info log (`workspace_pr_skipped`) and no notification. If the remote URL can't be parsed into `owner/repo`, same treatment.
 
 ### The worktree archive (`.worktrees/_archive/`)
 
@@ -233,14 +235,13 @@ author_name = "agent-os"
 # email = "maker@example.com"
 # name   = "The Maker"
 
-[project.pull_request]           # Auto-open a PR after successful push
-enabled = true                   # GitHub-only; skipped quietly on other hosts
-draft = false                    # true → open as draft
-# base_branch = "main"           # defaults to [project].default_branch
-
 [project.archive]                # Worktree archival for forensics
 enabled = true
 keep_last = 10                   # Older archived worktrees pruned on each archive
+
+# Note: there is no [project.pull_request] config — PR emission is
+# implicit. On GitHub remotes we emit a pre-filled compare URL in a
+# `workspace_pr_ready` notification; on other hosts we skip.
 
 [budget]
 task = 5.00

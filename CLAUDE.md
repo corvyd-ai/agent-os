@@ -306,7 +306,7 @@ When a `[project]` section is configured in `agent-os.toml`, builder agents (rol
 4. **Validate** — runs `[project.validate].commands` (e.g. `pytest`, `ruff check .`)
 5. **Retry** — if validation fails and `on_failure = "retry"`, the agent gets another chance with the error output
 6. **Commit + push** — `git add -A && git commit` with auto-generated message, then `git push` to remote
-7. **Open PR** — on GitHub remotes only, runs `gh pr create` automatically. Non-GitHub remotes are skipped with an info log (no notification). Configurable via `[project.pull_request]`.
+7. **Compose PR URL** — on GitHub remotes only, agent-os builds a pre-filled "compare" URL (`https://github.com/{owner}/{repo}/compare/{base}...{head}?expand=1&title=...&body=...`) and fires a `workspace_pr_ready` notification. **Nothing is opened on GitHub until a human clicks the link in the browser.** No `gh` CLI, no API token — pure URL assembly. Non-GitHub remotes are skipped with an info log.
 8. **Complete + archive** — task moves to `done/`. Worktree is moved (not deleted) to `.worktrees/_archive/{task-id}__{status}__{timestamp}/` for forensics; archive retains the last N entries (default 10).
 
 **Key design properties:**
@@ -317,7 +317,7 @@ When a `[project]` section is configured in `agent-os.toml`, builder agents (rol
 - PR failures are non-fatal — branch is on the remote; humans can open the PR manually
 - No changes to commit = still completes the task (agent may have determined no changes needed)
 - Without `[project]` config, agents work exactly as before (no workspace, `cwd=company_root`)
-- **PR creation is GitHub-only** (via `gh pr create`). Non-GitHub remotes (GitLab, Bitbucket, self-hosted) are detected and the PR step is skipped. Adding providers requires extending `open_pull_request()` in `workspace.py`.
+- **PR URL emission is GitHub-only**. Non-GitHub remotes (GitLab, Bitbucket, self-hosted) are detected and skipped. Adding providers means plugging another URL builder into `build_pr_url()` in `workspace.py` — no new dependencies, no new auth story per provider.
 - **Event visibility** — every anomaly during workspace create/cleanup (leftover archived, fetch failed, per-attempt used, cleanup failed) becomes a log line + (for notable kinds) a notification. Event types registered in `notifications.KNOWN_EVENT_TYPES` so `agent-os notifications events` lists them.
 
 ### Task Creation
@@ -370,13 +370,12 @@ commands = ["npm test", "npm run lint"]
 on_failure = "retry"
 max_retries = 2
 
-[project.pull_request]           # GitHub-only; skipped on other remotes
-enabled = true
-draft = false
-
 [project.archive]                # Worktree forensics archive
 enabled = true
 keep_last = 10
+
+# Note: no [project.pull_request] section — PR emission is implicit.
+# On GitHub remotes we emit a pre-filled compare URL; others are skipped.
 
 [prompts]
 override_dir = "prompts"

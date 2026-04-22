@@ -671,11 +671,11 @@ async def _run_agent_with_workspace(
         WorkspaceError,
         WorkspaceEvent,
         archive_workspace,
+        build_pr_url,
         cleanup_workspace,
         commit_workspace,
         create_workspace,
         has_uncommitted_changes,
-        open_pull_request,
         push_workspace,
         salvage_commit,
         setup_workspace,
@@ -1078,22 +1078,25 @@ async def _run_agent_with_workspace(
             push_ok, push_output = push_workspace(workspace, config=cfg)
             if push_ok:
                 log.info("workspace_pushed", f"Pushed {workspace.branch}", {"task_id": task_id})
-                # --- Open a pull request (GitHub only; non-fatal) ---
-                pr_ok, pr_url, pr_message = open_pull_request(workspace, task_meta, agent_config.agent_id, config=cfg)
-                if pr_ok and pr_url:
+                # --- Compose a one-click PR URL (GitHub only; purely informational) ---
+                pr_url, pr_message = build_pr_url(workspace, task_meta, agent_config.agent_id, config=cfg)
+                if pr_url:
                     log.info(
-                        "workspace_pr_opened",
-                        f"Opened PR: {pr_url}",
+                        "workspace_pr_ready",
+                        f"PR ready to open: {pr_url}",
                         {"task_id": task_id, "branch": workspace.branch, "url": pr_url},
                     )
                     send_notification(
                         NotificationEvent(
-                            event_type="workspace_pr_opened",
+                            event_type="workspace_pr_ready",
                             severity="info",
-                            title=f"PR opened for task {task_id}",
+                            title=f"PR ready for task {task_id}",
                             detail=(
-                                f"Task {task_id} completed and a pull request was opened.\n\n"
-                                f"URL: {pr_url}\n"
+                                f"Task {task_id} completed and the branch is pushed. "
+                                f"Click the link below to open a pre-filled pull request — "
+                                f"nothing is created on GitHub until you press "
+                                f"`Create pull request` in the browser.\n\n"
+                                f"Open PR: {pr_url}\n"
                                 f"Branch: `{workspace.branch}`\n"
                                 f"Commit: {sha[:8]}"
                             ),
@@ -1107,36 +1110,14 @@ async def _run_agent_with_workspace(
                         ),
                         config=cfg,
                     )
-                elif pr_ok:
-                    # Intentional skip — not an error, but log so the reason
-                    # is discoverable ("PR disabled", "non-GitHub remote", etc).
+                else:
+                    # Not an error — just means we couldn't build a URL
+                    # (non-GitHub remote, push disabled, etc.). Log so the
+                    # reason is discoverable.
                     log.info(
                         "workspace_pr_skipped",
-                        f"PR creation skipped: {pr_message}",
+                        f"PR URL skipped: {pr_message}",
                         {"task_id": task_id, "branch": workspace.branch, "reason": pr_message},
-                    )
-                else:
-                    log.error(
-                        "workspace_pr_failed",
-                        f"PR creation failed (non-fatal): {pr_message}",
-                        {"task_id": task_id, "branch": workspace.branch, "error": pr_message},
-                    )
-                    send_notification(
-                        NotificationEvent(
-                            event_type="workspace_pr_failed",
-                            severity="warning",
-                            title=f"PR creation failed for task {task_id}",
-                            detail=(
-                                f"Branch `{workspace.branch}` was pushed successfully but the "
-                                f"follow-up `gh pr create` call failed. Task is still marked "
-                                f"done — the branch is on the remote and a PR can be opened "
-                                f"manually.\n\n"
-                                f"Error:\n{pr_message[:500]}"
-                            ),
-                            agent_id=agent_config.agent_id,
-                            refs={"task_id": task_id, "branch": workspace.branch, "sha": sha},
-                        ),
-                        config=cfg,
                     )
             else:
                 # Push failure is non-fatal for THIS task (the commit is in
