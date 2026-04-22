@@ -671,11 +671,11 @@ async def _run_agent_with_workspace(
         WorkspaceError,
         WorkspaceEvent,
         archive_workspace,
+        build_pr_url,
         cleanup_workspace,
         commit_workspace,
         create_workspace,
         has_uncommitted_changes,
-        open_pull_request,
         push_workspace,
         salvage_commit,
         setup_workspace,
@@ -1078,22 +1078,25 @@ async def _run_agent_with_workspace(
             push_ok, push_output = push_workspace(workspace, config=cfg)
             if push_ok:
                 log.info("workspace_pushed", f"Pushed {workspace.branch}", {"task_id": task_id})
-                # --- Open a pull request (GitHub only; non-fatal) ---
-                pr_ok, pr_url, pr_message = open_pull_request(workspace, task_meta, agent_config.agent_id, config=cfg)
-                if pr_ok and pr_url:
+                # --- Compose a one-click PR URL (GitHub only; purely informational) ---
+                pr_url, pr_message = build_pr_url(workspace, task_meta, agent_config.agent_id, config=cfg)
+                if pr_url:
                     log.info(
-                        "workspace_pr_opened",
-                        f"Opened PR: {pr_url}",
+                        "workspace_pr_ready",
+                        f"PR ready to open: {pr_url}",
                         {"task_id": task_id, "branch": workspace.branch, "url": pr_url},
                     )
                     send_notification(
                         NotificationEvent(
-                            event_type="workspace_pr_opened",
+                            event_type="workspace_pr_ready",
                             severity="info",
-                            title=f"PR opened for task {task_id}",
+                            title=f"PR ready for task {task_id}",
                             detail=(
-                                f"Task {task_id} completed and a pull request was opened.\n\n"
-                                f"URL: {pr_url}\n"
+                                f"Task {task_id} completed and the branch is pushed. "
+                                f"Click the link below to open a pre-filled pull request — "
+                                f"nothing is created on GitHub until you press "
+                                f"`Create pull request` in the browser.\n\n"
+                                f"Open PR: {pr_url}\n"
                                 f"Branch: `{workspace.branch}`\n"
                                 f"Commit: {sha[:8]}"
                             ),
@@ -1107,36 +1110,14 @@ async def _run_agent_with_workspace(
                         ),
                         config=cfg,
                     )
-                elif pr_ok:
-                    # Intentional skip — not an error, but log so the reason
-                    # is discoverable ("PR disabled", "non-GitHub remote", etc).
+                else:
+                    # Not an error — just means we couldn't build a URL
+                    # (non-GitHub remote, push disabled, etc.). Log so the
+                    # reason is discoverable.
                     log.info(
                         "workspace_pr_skipped",
-                        f"PR creation skipped: {pr_message}",
+                        f"PR URL skipped: {pr_message}",
                         {"task_id": task_id, "branch": workspace.branch, "reason": pr_message},
-                    )
-                else:
-                    log.error(
-                        "workspace_pr_failed",
-                        f"PR creation failed (non-fatal): {pr_message}",
-                        {"task_id": task_id, "branch": workspace.branch, "error": pr_message},
-                    )
-                    send_notification(
-                        NotificationEvent(
-                            event_type="workspace_pr_failed",
-                            severity="warning",
-                            title=f"PR creation failed for task {task_id}",
-                            detail=(
-                                f"Branch `{workspace.branch}` was pushed successfully but the "
-                                f"follow-up `gh pr create` call failed. Task is still marked "
-                                f"done — the branch is on the remote and a PR can be opened "
-                                f"manually.\n\n"
-                                f"Error:\n{pr_message[:500]}"
-                            ),
-                            agent_id=agent_config.agent_id,
-                            refs={"task_id": task_id, "branch": workspace.branch, "sha": sha},
-                        ),
-                        config=cfg,
                     )
             else:
                 # Push failure is non-fatal for THIS task (the commit is in
@@ -1271,46 +1252,46 @@ async def run_drive_consultation(
     expected_at = _now_iso()  # Drive consultations run on cron schedule; expected = now
     log.info("drive_consultation_start", "Consulting drives (scheduled)", {"expected_at": expected_at})
 
-    journal = aios.read_journal(agent_key, max_entries=5, config=cfg)
-    journal_context = ""
-    if journal:
-        journal_context = f"\n\n# Your Recent Journal Entries\n\n{journal}"
-
-    system_prompt = composer.build_system_prompt(agent_config) + journal_context
-
-    company_drives = aios.read_drives(config=cfg)
-    proposals = aios.list_active_proposals(config=cfg)
-    if proposals:
-        proposals_text = "\n\n".join(
-            f"### {meta.get('title', 'Untitled')} "
-            f"(by {meta.get('proposed_by', 'unknown')}, {meta.get('date', '?')})\n\n"
-            f"**File**: {path.name}\n\n{body}"
-            for meta, body, path in proposals
-        )
-    else:
-        proposals_text = "(No active proposals)"
-
-    prompt = composer.render_template(
-        "drive_consultation.jinja2",
-        company_drives=company_drives or "(No company drives document yet)",
-        active_proposals=proposals_text,
-        agent_id=agent_key,
-    )
-
-    os.environ.pop("CLAUDECODE", None)
-    _ensure_api_key()
-
-    stderr_capture = StderrCapture(agent_key)
-    options = _make_options(
-        agent_config,
-        system_prompt,
-        config=cfg,
-        max_turns=max_turns or cfg.drive_consultation_max_turns,
-        max_budget_usd=max_budget_usd or cfg.drive_consultation_max_budget_usd,
-        stderr_capture=stderr_capture,
-    )
-
     try:
+        journal = aios.read_journal(agent_key, max_entries=5, config=cfg)
+        journal_context = ""
+        if journal:
+            journal_context = f"\n\n# Your Recent Journal Entries\n\n{journal}"
+
+        system_prompt = composer.build_system_prompt(agent_config) + journal_context
+
+        company_drives = aios.read_drives(config=cfg)
+        proposals = aios.list_active_proposals(config=cfg)
+        if proposals:
+            proposals_text = "\n\n".join(
+                f"### {meta.get('title', 'Untitled')} "
+                f"(by {meta.get('proposed_by', 'unknown')}, {meta.get('date', '?')})\n\n"
+                f"**File**: {path.name}\n\n{body}"
+                for meta, body, path in proposals
+            )
+        else:
+            proposals_text = "(No active proposals)"
+
+        prompt = composer.render_template(
+            "drive_consultation.jinja2",
+            company_drives=company_drives or "(No company drives document yet)",
+            active_proposals=proposals_text,
+            agent_id=agent_key,
+        )
+
+        os.environ.pop("CLAUDECODE", None)
+        _ensure_api_key()
+
+        stderr_capture = StderrCapture(agent_key)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            max_turns=max_turns or cfg.drive_consultation_max_turns,
+            max_budget_usd=max_budget_usd or cfg.drive_consultation_max_budget_usd,
+            stderr_capture=stderr_capture,
+        )
+
         result_msg = await _run_query(
             prompt,
             options,
@@ -1318,8 +1299,9 @@ async def run_drive_consultation(
             stderr_capture=stderr_capture,
             max_retries=1,
         )
-    except RuntimeError as e:
-        error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
+    except Exception as e:
+        stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+        error_refs = _error_classifier.build_error_refs(e.__cause__ or e if e.__cause__ else e, stderr_text)
         log.error("drive_consultation_error", str(e), error_refs)
         return
 
@@ -1360,28 +1342,28 @@ async def run_dream_cycle(
     log = get_logger(agent_key)
     log.info("dream_start", "Entering dream cycle (nightly memory reorganization)")
 
-    system_prompt = composer.build_system_prompt(agent_config)
-
-    prompt = composer.render_template("dream.jinja2", agent_id=agent_key)
-
-    os.environ.pop("CLAUDECODE", None)
-    _ensure_api_key()
-
-    dream_model = cfg.dream_model
-    log.debug("dream_model", f"Dream model: {dream_model}", {"model": dream_model})
-
-    stderr_capture = StderrCapture(agent_key)
-    options = _make_options(
-        agent_config,
-        system_prompt,
-        config=cfg,
-        max_turns=max_turns or cfg.dream_max_turns,
-        max_budget_usd=max_budget_usd or cfg.dream_max_budget_usd,
-        model=dream_model,
-        stderr_capture=stderr_capture,
-    )
-
     try:
+        system_prompt = composer.build_system_prompt(agent_config)
+
+        prompt = composer.render_template("dream.jinja2", agent_id=agent_key)
+
+        os.environ.pop("CLAUDECODE", None)
+        _ensure_api_key()
+
+        dream_model = cfg.dream_model
+        log.debug("dream_model", f"Dream model: {dream_model}", {"model": dream_model})
+
+        stderr_capture = StderrCapture(agent_key)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            max_turns=max_turns or cfg.dream_max_turns,
+            max_budget_usd=max_budget_usd or cfg.dream_max_budget_usd,
+            model=dream_model,
+            stderr_capture=stderr_capture,
+        )
+
         result_msg = await _run_query(
             prompt,
             options,
@@ -1389,8 +1371,9 @@ async def run_dream_cycle(
             stderr_capture=stderr_capture,
             max_retries=1,
         )
-    except RuntimeError as e:
-        error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
+    except Exception as e:
+        stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+        error_refs = _error_classifier.build_error_refs(e.__cause__ or e if e.__cause__ else e, stderr_text)
         log.error("dream_error", str(e), error_refs)
         return
 
@@ -1858,8 +1841,10 @@ async def run_standing_orders(
                 stderr_capture=stderr_capture,
                 max_retries=2,
             )
-        except RuntimeError as e:
-            error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text, order=order_name)
+        except Exception as e:
+            error_refs = _error_classifier.build_error_refs(
+                e.__cause__ or e if e.__cause__ else e, stderr_capture.text, order=order_name
+            )
             log.error(
                 "standing_order_error",
                 f"Error in standing order '{order_name}': {e}",

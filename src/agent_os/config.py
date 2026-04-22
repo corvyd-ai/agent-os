@@ -183,14 +183,6 @@ class Config:
     project_commit_author_name: str = ""
     project_agent_commit_authors: dict[str, dict[str, str]] = field(default_factory=dict)
 
-    # Pull request creation — runs after a successful push. GitHub-only for
-    # now (uses `gh pr create`); if the remote isn't GitHub we skip with a
-    # warning notification rather than failing the task. A failed PR open
-    # never fails the task; the branch is already pushed.
-    project_pull_request_enabled: bool = True
-    project_pull_request_draft: bool = False
-    project_pull_request_base_branch: str = ""  # empty = use project_default_branch
-
     # Worktree archive — on cleanup we move the worktree to
     # {worktrees_root}/_archive/{task-id}__{status}__{timestamp}/ instead of
     # deleting. Keeps last N; older are pruned. Gives humans forensic material
@@ -478,15 +470,6 @@ class Config:
         agent_authors = commit.get("agent_authors", {})
         if agent_authors:
             kwargs["project_agent_commit_authors"] = {agent_id: dict(v) for agent_id, v in agent_authors.items()}
-
-        # [project.pull_request]
-        pr = project.get("pull_request", {})
-        if "enabled" in pr:
-            kwargs["project_pull_request_enabled"] = bool(pr["enabled"])
-        if "draft" in pr:
-            kwargs["project_pull_request_draft"] = bool(pr["draft"])
-        if "base_branch" in pr:
-            kwargs["project_pull_request_base_branch"] = str(pr["base_branch"])
 
         # [project.archive]
         archive_cfg = project.get("archive", {})

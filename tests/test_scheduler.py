@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -308,3 +308,403 @@ class TestTickOperatingHoursGating:
         hours_skips = [s for s in result.skipped if "outside operating hours" in s]
         assert hours_skips == []
         assert result.outside_hours is False
+
+
+# --- Helpers for multi-agent dispatch tests ---
+
+FIVE_AGENTS = [
+    _FakeAgent("agent-000-steward"),
+    _FakeAgent("agent-001-maker"),
+    _FakeAgent("agent-003-operator"),
+    _FakeAgent("agent-005-grower"),
+    _FakeAgent("agent-006-strategist"),
+]
+
+FIVE_AGENT_IDS = [a.agent_id for a in FIVE_AGENTS]
+
+
+def _make_minimal_cfg(tmp_path, **overrides):
+    """Build a Config with all schedule types disabled unless overridden."""
+    root = tmp_path / "company"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "agents" / "registry").mkdir(parents=True, exist_ok=True)
+    (root / "agents" / "logs").mkdir(parents=True, exist_ok=True)
+    (root / "finance" / "costs").mkdir(parents=True, exist_ok=True)
+    (root / "operations").mkdir(parents=True, exist_ok=True)
+    defaults = dict(
+        company_root=root,
+        schedule_enabled=True,
+        schedule_operating_hours="",
+        schedule_cycles_enabled=False,
+        schedule_standing_orders_enabled=False,
+        schedule_drives_enabled=False,
+        schedule_dreams_enabled=False,
+        schedule_archive_enabled=False,
+        schedule_manifest_enabled=False,
+        schedule_watchdog_enabled=False,
+        schedule_digest_enabled=False,
+    )
+    defaults.update(overrides)
+    return Config(**defaults)
+
+
+class TestDreamStaggerMultiAgent:
+    """Regression: dream cycles must dispatch to ALL agents, not just index 0.
+
+    The original bug: an outer _is_time_match(dream_time) gate only passed
+    when the clock read exactly the base dream time (e.g. 02:00). Staggered
+    agents at 02:10, 02:20, etc. were never dispatched because the outer
+    gate failed at those minutes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_each_agent_dispatched_at_staggered_minute(self, tmp_path):
+        """5 agents with 10-min stagger: agent N fires at 02:00 + N*10."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:00",
+            schedule_dreams_stagger_minutes=10,
+        )
+
+        dispatched_agents = {}
+
+        for minute in range(0, 50, 10):  # 02:00, 02:10, 02:20, 02:30, 02:40
+            fake_now = datetime(2026, 4, 14, 2, minute, tzinfo=cfg.tz)
+
+            with (
+                patch("agent_os.scheduler._now", return_value=fake_now),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.runner.run_dream_cycle", new_callable=AsyncMock),
+            ):
+                result = await tick(config=cfg)
+
+            for d in result.dispatched:
+                if d.type == "dreams":
+                    dispatched_agents[d.agent] = minute
+
+        # All 5 agents dispatched at correct minutes
+        assert len(dispatched_agents) == 5, f"Only {len(dispatched_agents)}/5 agents dispatched: {dispatched_agents}"
+        assert dispatched_agents["agent-000-steward"] == 0
+        assert dispatched_agents["agent-001-maker"] == 10
+        assert dispatched_agents["agent-003-operator"] == 20
+        assert dispatched_agents["agent-005-grower"] == 30
+        assert dispatched_agents["agent-006-strategist"] == 40
+
+    @pytest.mark.asyncio
+    async def test_only_one_agent_per_stagger_slot(self, tmp_path):
+        """At 02:10, exactly one agent (index 1) should dispatch, not others."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:00",
+            schedule_dreams_stagger_minutes=10,
+        )
+
+        fake_now = datetime(2026, 4, 14, 2, 10, tzinfo=cfg.tz)  # 02:10
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.runner.run_dream_cycle", new_callable=AsyncMock) as mock_dream,
+        ):
+            result = await tick(config=cfg)
+
+        dream_dispatches = [d for d in result.dispatched if d.type == "dreams"]
+        assert len(dream_dispatches) == 1
+        assert dream_dispatches[0].agent == "agent-001-maker"
+        mock_dream.assert_called_once_with("agent-001-maker", config=cfg)
+
+    @pytest.mark.asyncio
+    async def test_no_stagger_dispatches_all_at_same_minute(self, tmp_path):
+        """With stagger_minutes=0, all agents dispatch at the base dream time."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:00",
+            schedule_dreams_stagger_minutes=0,
+        )
+
+        fake_now = datetime(2026, 4, 14, 2, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.runner.run_dream_cycle", new_callable=AsyncMock) as mock_dream,
+        ):
+            result = await tick(config=cfg)
+
+        dream_dispatches = [d for d in result.dispatched if d.type == "dreams"]
+        assert len(dream_dispatches) == 5
+        dispatched_ids = {d.agent for d in dream_dispatches}
+        assert dispatched_ids == set(FIVE_AGENT_IDS)
+        assert mock_dream.call_count == 5
+
+    @pytest.mark.asyncio
+    async def test_stagger_wraps_past_hour_boundary(self, tmp_path):
+        """Stagger from 02:55 with 10-min offsets should wrap into 03:xx."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:55",
+            schedule_dreams_stagger_minutes=10,
+        )
+
+        # Agent 0: 02:55, Agent 1: 03:05, Agent 2: 03:15
+        expected = [
+            (2, 55, "agent-000-steward"),
+            (3, 5, "agent-001-maker"),
+            (3, 15, "agent-003-operator"),
+            (3, 25, "agent-005-grower"),
+            (3, 35, "agent-006-strategist"),
+        ]
+
+        dispatched_agents = {}
+        for hour, minute, _agent_id in expected:
+            fake_now = datetime(2026, 4, 14, hour, minute, tzinfo=cfg.tz)
+
+            with (
+                patch("agent_os.scheduler._now", return_value=fake_now),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.runner.run_dream_cycle", new_callable=AsyncMock),
+            ):
+                result = await tick(config=cfg)
+
+            for d in result.dispatched:
+                if d.type == "dreams":
+                    dispatched_agents[d.agent] = (hour, minute)
+
+        assert len(dispatched_agents) == 5, f"Only {len(dispatched_agents)}/5 agents dispatched"
+        for hour, minute, agent_id in expected:
+            assert dispatched_agents[agent_id] == (hour, minute), (
+                f"{agent_id} expected at {hour:02d}:{minute:02d}, got {dispatched_agents.get(agent_id)}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_dream_minutes_dispatch_nothing(self, tmp_path):
+        """At 02:05 (between stagger slots), no agent should be dispatched."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:00",
+            schedule_dreams_stagger_minutes=10,
+        )
+
+        fake_now = datetime(2026, 4, 14, 2, 5, tzinfo=cfg.tz)  # 02:05 — not a slot
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.runner.run_dream_cycle", new_callable=AsyncMock) as mock_dream,
+        ):
+            result = await tick(config=cfg)
+
+        dream_dispatches = [d for d in result.dispatched if d.type == "dreams"]
+        assert len(dream_dispatches) == 0
+        mock_dream.assert_not_called()
+
+
+class TestStandingOrdersMultiAgent:
+    """Standing orders must dispatch to all agents, not just the first."""
+
+    @pytest.mark.asyncio
+    async def test_all_agents_receive_standing_orders(self, tmp_path):
+        """When cadence is due for all agents, all should be dispatched."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_standing_orders_enabled=True,
+            schedule_standing_orders_interval_minutes=60,
+        )
+
+        fake_now = datetime(2026, 4, 14, 12, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.runner.run_standing_orders", new_callable=AsyncMock) as mock_so,
+        ):
+            result = await tick(config=cfg)
+
+        so_dispatches = [d for d in result.dispatched if d.type == "standing_orders"]
+        assert len(so_dispatches) == 5, f"Only {len(so_dispatches)}/5 agents got standing orders"
+        dispatched_ids = {d.agent for d in so_dispatches}
+        assert dispatched_ids == set(FIVE_AGENT_IDS)
+        assert mock_so.call_count == 5
+
+
+class TestDrivesMultiAgent:
+    """Drive consultations must dispatch to all agents at the scheduled time."""
+
+    @pytest.mark.asyncio
+    async def test_all_agents_receive_drive_consultation(self, tmp_path):
+        """At a scheduled drive time, all agents should be dispatched."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_weekend_times=["13:00"],
+        )
+
+        # Tuesday at 17:00
+        fake_now = datetime(2026, 4, 14, 17, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.scheduler._is_time_match", side_effect=lambda t, **kw: t == "17:00"),
+            patch("agent_os.scheduler._is_weekend", return_value=False),
+            patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock) as mock_drives,
+        ):
+            result = await tick(config=cfg)
+
+        drive_dispatches = [d for d in result.dispatched if d.type == "drives"]
+        assert len(drive_dispatches) == 5, f"Only {len(drive_dispatches)}/5 agents got drive consultation"
+        dispatched_ids = {d.agent for d in drive_dispatches}
+        assert dispatched_ids == set(FIVE_AGENT_IDS)
+        assert mock_drives.call_count == 5
+
+
+class TestWeeklySimulation:
+    """Simulate a week of scheduler ticks for 5 agents.
+
+    Regression test: asserts that each agent receives at least one dream
+    cycle, standing-order dispatch, and drive consultation per day across
+    a full simulated week. This is the acceptance test that would have
+    caught the original stagger bug.
+    """
+
+    @pytest.mark.asyncio
+    async def test_full_week_coverage(self, tmp_path):
+        """7 days of ticks: every agent gets dreams, standing orders, and drives."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:00",
+            schedule_dreams_stagger_minutes=10,
+            schedule_standing_orders_enabled=True,
+            schedule_standing_orders_interval_minutes=60,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_weekend_times=["13:00"],
+        )
+
+        # Counters per agent per type
+        dream_count = {a: 0 for a in FIVE_AGENT_IDS}
+        so_count = {a: 0 for a in FIVE_AGENT_IDS}
+        drive_count = {a: 0 for a in FIVE_AGENT_IDS}
+
+        # Simulate 7 days: Mon Apr 13 through Sun Apr 19, 2026
+        base_date = datetime(2026, 4, 13, 0, 0, tzinfo=cfg.tz)  # Monday
+
+        for day_offset in range(7):
+            day_start = base_date + timedelta(days=day_offset)
+            is_weekend = day_start.weekday() >= 5
+
+            # --- Dream window ---
+            for minute_offset in range(0, 50, 10):
+                tick_time = day_start.replace(hour=2, minute=minute_offset)
+                with (
+                    patch("agent_os.scheduler._now", return_value=tick_time),
+                    patch("agent_os.scheduler.is_within_operating_hours", return_value=False),
+                    patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                    patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                    patch("agent_os.runner.run_dream_cycle", new_callable=AsyncMock),
+                ):
+                    result = await tick(config=cfg)
+                for d in result.dispatched:
+                    if d.type == "dreams":
+                        dream_count[d.agent] += 1
+
+            # --- Standing orders (cadence always due — no cadence files persisted) ---
+            tick_time = day_start.replace(hour=12, minute=0)
+            with (
+                patch("agent_os.scheduler._now", return_value=tick_time),
+                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.runner.run_standing_orders", new_callable=AsyncMock),
+                patch("agent_os.scheduler._is_time_match", return_value=False),
+                patch("agent_os.scheduler._is_weekend", return_value=is_weekend),
+            ):
+                result = await tick(config=cfg)
+            for d in result.dispatched:
+                if d.type == "standing_orders":
+                    so_count[d.agent] += 1
+
+            # --- Drive consultation ---
+            drive_hour = 13 if is_weekend else 17
+            drive_time_str = f"{drive_hour:02d}:00"
+            tick_time = day_start.replace(hour=drive_hour, minute=0)
+            with (
+                patch("agent_os.scheduler._now", return_value=tick_time),
+                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
+                patch(
+                    "agent_os.scheduler._is_time_match",
+                    side_effect=lambda t, _dts=drive_time_str, **kw: t == _dts,
+                ),
+                patch("agent_os.scheduler._is_weekend", return_value=is_weekend),
+            ):
+                result = await tick(config=cfg)
+            for d in result.dispatched:
+                if d.type == "drives":
+                    drive_count[d.agent] += 1
+
+        # --- Assertions: every agent gets every type every day ---
+        for agent_id in FIVE_AGENT_IDS:
+            assert dream_count[agent_id] >= 7, f"{agent_id}: expected ≥7 dream cycles, got {dream_count[agent_id]}"
+            assert so_count[agent_id] >= 7, (
+                f"{agent_id}: expected ≥7 standing-order dispatches, got {so_count[agent_id]}"
+            )
+            assert drive_count[agent_id] >= 7, (
+                f"{agent_id}: expected ≥7 drive consultations, got {drive_count[agent_id]}"
+            )
+
+        # Exact totals: 5 agents x 7 days = 35
+        assert sum(dream_count.values()) == 35
+        assert sum(so_count.values()) == 35
+        assert sum(drive_count.values()) == 35
+
+
+class TestDreamDispatchErrorEvents:
+    """Dream cycle errors must produce structured error events."""
+
+    @pytest.mark.asyncio
+    async def test_dream_error_produces_dispatch_record(self, tmp_path):
+        """When a dream cycle raises, the TickResult contains an error record."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:00",
+            schedule_dreams_stagger_minutes=0,
+        )
+
+        fake_now = datetime(2026, 4, 14, 2, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=[_FakeAgent("agent-001")]),
+            patch(
+                "agent_os.runner.run_dream_cycle",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("SDK crash"),
+            ),
+        ):
+            result = await tick(config=cfg)
+
+        dream_dispatches = [d for d in result.dispatched if d.type == "dreams"]
+        assert len(dream_dispatches) == 1
+        assert "error" in dream_dispatches[0].result
+        assert "SDK crash" in dream_dispatches[0].result

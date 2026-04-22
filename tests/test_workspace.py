@@ -8,13 +8,14 @@ import pytest
 from agent_os.config import Config
 from agent_os.workspace import (
     _is_github_remote,
+    _parse_github_owner_repo,
     archive_workspace,
+    build_pr_url,
     cleanup_workspace,
     commit_workspace,
     create_workspace,
     get_workspace,
     has_uncommitted_changes,
-    open_pull_request,
     push_workspace,
     salvage_commit,
     setup_workspace,
@@ -863,29 +864,15 @@ class TestCreateWorkspaceHardening:
         cleanup_workspace(ws2, delete_branch=True, config=project_config)
 
 
-class TestOpenPullRequest:
-    def test_skipped_when_pr_disabled(self, project_config):
-        cfg = Config(
-            company_root=project_config.company_root,
-            project_repo_path=project_config.project_repo_path,
-            project_default_branch=project_config.project_default_branch,
-            project_push=True,
-            project_validate_commands=["true"],
-            project_worktrees_dir=str(project_config.worktrees_root),
-            project_pull_request_enabled=False,
-        )
-        ws = create_workspace("task-pr-001", config=cfg)
-        ok, url, msg = open_pull_request(ws, {"id": "task-pr-001", "title": "t"}, "agent-001", config=cfg)
-        assert ok is True
-        assert url is None
-        assert "disabled" in msg.lower()
-        cleanup_workspace(ws, delete_branch=True, config=cfg)
+class TestBuildPrUrl:
+    """build_pr_url replaces the former gh-CLI PR opener. It composes a
+    pre-filled GitHub compare URL from the remote + branch names. No
+    network calls, no external CLI — pure git + URL string assembly."""
 
     def test_skipped_when_push_disabled(self, project_config):
         # project_config has project_push=False by default.
-        ws = create_workspace("task-pr-002", config=project_config)
-        ok, url, msg = open_pull_request(ws, {"id": "task-pr-002", "title": "t"}, "agent-001", config=project_config)
-        assert ok is True
+        ws = create_workspace("task-pr-001", config=project_config)
+        url, msg = build_pr_url(ws, {"id": "task-pr-001", "title": "t"}, "agent-001", config=project_config)
         assert url is None
         assert "push" in msg.lower()
         cleanup_workspace(ws, delete_branch=True, config=project_config)
@@ -899,15 +886,13 @@ class TestOpenPullRequest:
             project_validate_commands=["true"],
             project_worktrees_dir=str(tmp_path / "worktrees"),
         )
-        ws = create_workspace("task-pr-003", config=cfg)
-        ok, url, msg = open_pull_request(ws, {"id": "task-pr-003", "title": "t"}, "agent-001", config=cfg)
-        assert ok is True
+        ws = create_workspace("task-pr-002", config=cfg)
+        url, msg = build_pr_url(ws, {"id": "task-pr-002", "title": "t"}, "agent-001", config=cfg)
         assert url is None
         assert "not configured" in msg.lower()
         cleanup_workspace(ws, delete_branch=True, config=cfg)
 
     def test_skipped_when_remote_is_not_github(self, git_repo, tmp_path):
-        # Add a non-GitHub remote.
         subprocess.run(
             ["git", "remote", "add", "origin", "https://gitlab.com/fake/repo.git"],
             cwd=str(git_repo),
@@ -922,24 +907,75 @@ class TestOpenPullRequest:
             project_validate_commands=["true"],
             project_worktrees_dir=str(tmp_path / "worktrees"),
         )
-        ws = create_workspace("task-pr-004", config=cfg)
-        ok, url, msg = open_pull_request(ws, {"id": "task-pr-004", "title": "t"}, "agent-001", config=cfg)
-        assert ok is True
+        ws = create_workspace("task-pr-003", config=cfg)
+        url, msg = build_pr_url(ws, {"id": "task-pr-003", "title": "t"}, "agent-001", config=cfg)
         assert url is None
         assert "not a github" in msg.lower()
         cleanup_workspace(ws, delete_branch=True, config=cfg)
 
-    def test_pr_config_parsed_from_toml(self, tmp_path):
+    def test_builds_pre_filled_compare_url_for_github_https(self, git_repo, tmp_path):
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/myorg/myrepo.git"],
+            cwd=str(git_repo),
+            capture_output=True,
+            check=True,
+        )
+        cfg = Config(
+            company_root=git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=True,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-pr-004", config=cfg)
+        url, msg = build_pr_url(
+            ws,
+            {"id": "task-pr-004", "title": "Add feature", "priority": "high"},
+            "agent-001",
+            config=cfg,
+        )
+        assert url is not None
+        assert msg == "ok"
+        assert url.startswith("https://github.com/myorg/myrepo/compare/main...")
+        # Branch is agent/task-pr-004, urlencoded slash becomes %2F.
+        assert "agent%2Ftask-pr-004" in url
+        assert "expand=1" in url
+        # Title is URL-encoded in the query string.
+        assert "title=%5Btask-pr-004%5D%20Add%20feature" in url
+        # Body includes agent, priority, branch references — also encoded.
+        assert "body=" in url
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_builds_url_for_github_ssh_remote(self, git_repo, tmp_path):
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:myorg/myrepo.git"],
+            cwd=str(git_repo),
+            capture_output=True,
+            check=True,
+        )
+        cfg = Config(
+            company_root=git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=True,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-pr-005", config=cfg)
+        url, _msg = build_pr_url(ws, {"id": "task-pr-005", "title": "t"}, "agent-001", config=cfg)
+        assert url is not None
+        assert url.startswith("https://github.com/myorg/myrepo/compare/main...")
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_archive_config_parsed_from_toml(self, tmp_path):
+        # Legacy [project.pull_request] is intentionally unsupported post-swap;
+        # this test just verifies [project.archive] still parses cleanly.
         toml = tmp_path / "agent-os.toml"
         toml.write_text(
             """
 [company]
 name = "Test"
-
-[project.pull_request]
-enabled = false
-draft = true
-base_branch = "develop"
 
 [project.archive]
 enabled = false
@@ -947,11 +983,30 @@ keep_last = 5
 """
         )
         cfg = Config.from_toml(toml)
-        assert cfg.project_pull_request_enabled is False
-        assert cfg.project_pull_request_draft is True
-        assert cfg.project_pull_request_base_branch == "develop"
         assert cfg.project_archive_enabled is False
         assert cfg.project_archive_keep_last == 5
+
+
+class TestParseGithubOwnerRepo:
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://github.com/owner/repo.git", ("owner", "repo")),
+            ("https://github.com/owner/repo", ("owner", "repo")),
+            ("git@github.com:owner/repo.git", ("owner", "repo")),
+            ("git@github.com:owner/repo", ("owner", "repo")),
+            ("ssh://git@github.com/owner/repo.git", ("owner", "repo")),
+            ("ssh://git@github.com/owner/repo", ("owner", "repo")),
+            ("https://github.com/corvyd-ai/agent-os.git", ("corvyd-ai", "agent-os")),
+            # Edge: trailing slash
+            ("https://github.com/owner/repo/", ("owner", "repo")),
+            # Non-GitHub URLs must return None
+            ("https://gitlab.com/owner/repo.git", None),
+            ("", None),
+        ],
+    )
+    def test_parses_owner_repo(self, url, expected):
+        assert _parse_github_owner_repo(url) == expected
 
 
 class TestFastForwardLocalDefaultBranch:

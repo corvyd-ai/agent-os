@@ -267,10 +267,15 @@ async def tick(*, config: Config | None = None) -> TickResult:
                     await runner.run_cycle(agent_id, config=cfg)
                     record.result = "done"
                     _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
+                    get_logger("system").info(
+                        "dispatch_complete",
+                        f"Completed cycle for {agent_id}",
+                        {"type": "cycle", "agent": agent_id},
+                    )
                 except Exception as e:
                     record.result = f"error: {e}"
                     get_logger("system").error(
-                        "tick_error", f"Error in cycle for {agent_id}: {e}", {"type": "cycle", "agent": agent_id}
+                        "dispatch_error", f"Error in cycle for {agent_id}: {e}", {"type": "cycle", "agent": agent_id}
                     )
                 finally:
                     lock.close()
@@ -298,13 +303,22 @@ async def tick(*, config: Config | None = None) -> TickResult:
                     await runner.run_standing_orders(agent_id, config=cfg)
                     record.result = "done"
                     _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
+                    get_logger("system").info(
+                        "dispatch_complete",
+                        f"Completed standing orders for {agent_id}",
+                        {"type": "standing_orders", "agent": agent_id},
+                    )
                 except Exception as e:
                     record.result = f"error: {e}"
                     get_logger("system").error(
-                        "tick_error",
+                        "dispatch_error",
                         f"Error in standing orders for {agent_id}: {e}",
                         {"type": "standing_orders", "agent": agent_id},
                     )
+                    # Mark cadence even on failure to prevent infinite retry
+                    # loops every tick.  The order retries after the normal
+                    # cadence interval instead of hammering every minute.
+                    _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -330,22 +344,34 @@ async def tick(*, config: Config | None = None) -> TickResult:
                     )
                     await runner.run_drive_consultation(agent_id, config=cfg)
                     record.result = "done"
+                    get_logger("system").info(
+                        "dispatch_complete",
+                        f"Completed drive consultation for {agent_id}",
+                        {"type": "drives", "agent": agent_id},
+                    )
                 except Exception as e:
                     record.result = f"error: {e}"
                     get_logger("system").error(
-                        "tick_error", f"Error in drives for {agent_id}: {e}", {"type": "drives", "agent": agent_id}
+                        "dispatch_error", f"Error in drives for {agent_id}: {e}", {"type": "drives", "agent": agent_id}
                     )
                 finally:
                     lock.close()
                 result.dispatched.append(record)
 
     # --- Dream cycles ---
-    if cfg.schedule_dreams_enabled and _is_time_match(cfg.schedule_dreams_time, config=cfg):
+    # Each agent's dream fires at dream_time + (index * stagger_minutes).
+    # We check each agent independently so that staggered agents fire at
+    # the correct minute rather than being gated by a single time-match
+    # on the base dream_time (which would only ever match agent index 0).
+    if cfg.schedule_dreams_enabled:
+        dream_hour, dream_base_minute = _parse_time(cfg.schedule_dreams_time)
+        now = _now(config=cfg)
         for idx, agent_id in enumerate(agent_ids):
-            # Stagger: only dispatch if minute offset matches
             stagger_offset = idx * cfg.schedule_dreams_stagger_minutes
-            dream_minute = _parse_time(cfg.schedule_dreams_time)[1] + stagger_offset
-            if _now(config=cfg).minute != dream_minute % 60:
+            target_total_minutes = dream_hour * 60 + dream_base_minute + stagger_offset
+            target_hour = (target_total_minutes // 60) % 24
+            target_minute = target_total_minutes % 60
+            if now.hour != target_hour or now.minute != target_minute:
                 continue
 
             lock = acquire_lock(agent_id, "dream", config=cfg)
@@ -360,10 +386,15 @@ async def tick(*, config: Config | None = None) -> TickResult:
                 )
                 await runner.run_dream_cycle(agent_id, config=cfg)
                 record.result = "done"
+                get_logger("system").info(
+                    "dispatch_complete",
+                    f"Completed dream cycle for {agent_id}",
+                    {"type": "dreams", "agent": agent_id},
+                )
             except Exception as e:
                 record.result = f"error: {e}"
                 get_logger("system").error(
-                    "tick_error", f"Error in dream for {agent_id}: {e}", {"type": "dreams", "agent": agent_id}
+                    "dispatch_error", f"Error in dream for {agent_id}: {e}", {"type": "dreams", "agent": agent_id}
                 )
             finally:
                 lock.close()

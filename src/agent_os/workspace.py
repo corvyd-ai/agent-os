@@ -935,62 +935,71 @@ def archive_workspace(
     return target, events
 
 
-_PR_URL_RE = re.compile(r"https://github\.com/[^\s]+/pull/\d+")
+# Matches `owner/repo` inside a GitHub remote URL, whether HTTPS
+# (`https://github.com/owner/repo.git`), SCP-style SSH
+# (`git@github.com:owner/repo.git`), or full SSH
+# (`ssh://git@github.com/owner/repo`).
+_GITHUB_OWNER_REPO_RE = re.compile(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
 
 
-def open_pull_request(
+def _parse_github_owner_repo(url: str) -> tuple[str, str] | None:
+    """Extract (owner, repo) from a GitHub remote URL. None if not parseable."""
+    m = _GITHUB_OWNER_REPO_RE.search(url.strip())
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def build_pr_url(
     workspace: Workspace,
     task_meta: dict,
     agent_id: str,
     *,
     config: Config | None = None,
-) -> tuple[bool, str | None, str]:
-    """Open a pull request for the workspace branch via `gh pr create`.
+) -> tuple[str | None, str]:
+    """Compose a pre-filled GitHub "compare" URL for the workspace branch.
 
-    Returns `(ok, url, message)`:
-      - `ok=True, url="https://github.com/…/pull/N", message=""` on success
-      - `ok=True, url=None, message="skipped: …"` on intentional skip
-        (push disabled, PR disabled, non-GitHub remote, etc.)
-      - `ok=False, url=None, message="error …"` on failure
+    Returns `(url, message)`:
+      - `(url, "ok")` when we could build a compare URL
+      - `(None, "skipped: …")` when we couldn't (push disabled, no remote,
+        non-GitHub remote, un-parseable URL)
 
-    GitHub-only for now. Non-fatal by design — the branch is already pushed
-    and a human can always open the PR manually.
+    This is *the* PR integration. Platform stays pure git; the compare URL
+    is a one-click PR form in the browser. No external CLI, no API token,
+    no extra auth beyond the push credentials git already uses. Non-GitHub
+    remotes can be supported later by swapping in a different URL builder
+    behind the same function signature.
+
+    The URL pre-fills `title` + `body` as query params so the PR form
+    opens ready for a human to click "Create pull request." Nothing on
+    GitHub's side commits until that click happens — the human remains in
+    the loop for review and merge.
     """
+    from urllib.parse import quote
+
     cfg = config or get_config()
     repo = cfg.repo_root
 
-    if not cfg.project_pull_request_enabled:
-        return True, None, "skipped: [project.pull_request] disabled"
     if not cfg.project_push:
-        return True, None, "skipped: [project].push is disabled — no pushed branch to PR"
+        return None, "skipped: [project].push is disabled — no pushed branch to link"
     if not _has_remote(cfg.project_remote, cwd=repo):
-        return True, None, f"skipped: remote '{cfg.project_remote}' is not configured"
+        return None, f"skipped: remote '{cfg.project_remote}' is not configured"
 
     url = _remote_url(cfg.project_remote, cwd=repo)
     if not _is_github_remote(url):
-        return True, None, f"skipped: remote '{cfg.project_remote}' ({url}) is not a GitHub repo"
+        return None, f"skipped: remote '{cfg.project_remote}' ({url}) is not a GitHub repo"
 
-    # Verify gh is installed + authenticated. `gh auth status` returns 0
-    # when authenticated to any host — good enough signal.
-    gh_check = subprocess.run(
-        ["gh", "auth", "status"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if gh_check.returncode != 0:
-        return (
-            False,
-            None,
-            f"gh not authenticated: {(gh_check.stderr or gh_check.stdout).strip()[:300]}",
-        )
+    parsed = _parse_github_owner_repo(url)
+    if not parsed:
+        return None, f"skipped: could not parse owner/repo from '{url}'"
+    owner, repo_name = parsed
 
     task_id = task_meta.get("id", workspace.task_id)
     title = task_meta.get("title", "Untitled task")
     priority = task_meta.get("priority", "medium")
     description = task_meta.get("description", "") or ""
 
-    base_branch = cfg.project_pull_request_base_branch or cfg.project_default_branch
+    base_branch = cfg.project_default_branch
 
     body_parts = [
         f"Automated PR from agent-os for task `{task_id}`.",
@@ -1009,48 +1018,20 @@ def open_pull_request(
         [
             "---",
             "",
-            "_Opened by agent-os. See the task file and commit history for details._",
+            "_Pre-filled by agent-os. Click `Create pull request` to open it._",
         ]
     )
     body = "\n".join(body_parts)
 
     pr_title = f"[{task_id}] {title}"
-    args = [
-        "gh",
-        "pr",
-        "create",
-        "--base",
-        base_branch,
-        "--head",
-        workspace.branch,
-        "--title",
-        pr_title,
-        "--body",
-        body,
-    ]
-    if cfg.project_pull_request_draft:
-        args.append("--draft")
-
-    try:
-        result = subprocess.run(
-            args,
-            cwd=str(workspace.worktree_path) if workspace.worktree_path.exists() else str(repo),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired:
-        return False, None, "gh pr create timed out after 60s"
-    except FileNotFoundError:
-        return False, None, "gh CLI not installed"
-
-    combined = (result.stdout or "") + (result.stderr or "")
-    if result.returncode != 0:
-        return False, None, f"gh pr create failed: {combined.strip()[:500]}"
-
-    match = _PR_URL_RE.search(combined)
-    url = match.group(0) if match else None
-    return True, url, combined.strip()
+    # `safe=""` ensures every special character is percent-encoded so the
+    # resulting URL is valid regardless of title/body content.
+    compare_url = (
+        f"https://github.com/{owner}/{repo_name}/compare/"
+        f"{quote(base_branch, safe='')}...{quote(workspace.branch, safe='')}"
+        f"?expand=1&title={quote(pr_title, safe='')}&body={quote(body, safe='')}"
+    )
+    return compare_url, "ok"
 
 
 def get_workspace(
