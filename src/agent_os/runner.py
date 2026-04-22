@@ -669,15 +669,66 @@ async def _run_agent_with_workspace(
     from .notifications import NotificationEvent, send_notification
     from .workspace import (
         WorkspaceError,
+        WorkspaceEvent,
+        archive_workspace,
         cleanup_workspace,
         commit_workspace,
         create_workspace,
         has_uncommitted_changes,
+        open_pull_request,
         push_workspace,
         salvage_commit,
         setup_workspace,
         validate_workspace,
     )
+
+    # Event kinds that are worth waking a human up about (vs. info-only logs).
+    # Agents discover these via `agent-os notifications events` — keep the
+    # `event_type` strings in sync with notifications.KNOWN_EVENT_TYPES.
+    _WORKSPACE_EVENT_NOTIFY: dict[str, tuple[str, str]] = {
+        # event.kind                          -> (event_type, severity)
+        "fetch_failed": ("workspace_fetch_failed", "warning"),
+        "per_attempt_path_used": ("workspace_per_attempt_path_used", "warning"),
+        "existing_worktree_cleanup_failed": ("workspace_cleanup_failed", "warning"),
+        "cleanup_failed": ("workspace_cleanup_failed", "warning"),
+        "existing_worktree_archive_failed": ("workspace_cleanup_failed", "warning"),
+        "archive_move_failed": ("workspace_cleanup_failed", "warning"),
+        "existing_worktree_archived": ("workspace_leftover_archived", "info"),
+        "local_default_diverged": ("workspace_local_default_diverged", "warning"),
+    }
+
+    def _handle_workspace_events(events: list[WorkspaceEvent], phase: str) -> None:
+        """Log every WorkspaceEvent and fire notifications for notable kinds.
+
+        `phase` is a short label ("create", "cleanup", "archive") included in
+        the log payload so agents tracing the event stream can tell *when*
+        a thing happened, not just *what*.
+        """
+        for ev in events:
+            log.info(
+                f"workspace_event_{ev.kind}",
+                ev.message,
+                {"task_id": task_id, "phase": phase, **ev.detail},
+            )
+            mapping = _WORKSPACE_EVENT_NOTIFY.get(ev.kind)
+            if not mapping:
+                continue
+            event_type, severity = mapping
+            if severity == "info":
+                # Log-only events (like normal leftover archival) don't need
+                # to page a human — they're expected under retry scenarios.
+                continue
+            send_notification(
+                NotificationEvent(
+                    event_type=event_type,
+                    severity=severity,
+                    title=f"Workspace event for task {task_id}: {ev.kind}",
+                    detail=ev.message + (f"\n\nDetail: {ev.detail}" if ev.detail else ""),
+                    agent_id=agent_config.agent_id,
+                    refs={"task_id": task_id, "phase": phase, "kind": ev.kind},
+                ),
+                config=cfg,
+            )
 
     cfg = config
     log = get_logger(agent_config.agent_id)
@@ -703,8 +754,29 @@ async def _run_agent_with_workspace(
             # No agent work to preserve. Clean up entirely — both worktree
             # and branch — since the branch would just be an empty pointer
             # to the default branch head.
-            with contextlib.suppress(Exception):
-                cleanup_workspace(workspace, delete_branch=True, config=cfg)
+            try:
+                ok, steps, err = cleanup_workspace(workspace, delete_branch=True, config=cfg)
+                if not ok:
+                    _handle_workspace_events(
+                        [
+                            WorkspaceEvent(
+                                kind="cleanup_failed",
+                                message=f"Failed to clean empty workspace: {err}",
+                                detail={
+                                    "path": str(workspace.worktree_path),
+                                    "steps": steps,
+                                    "error": err or "",
+                                },
+                            )
+                        ],
+                        phase="cleanup",
+                    )
+            except Exception as e:
+                log.error(
+                    "workspace_cleanup_exception",
+                    f"Cleanup raised: {e}",
+                    {"task_id": task_id, "error": str(e)},
+                )
             return
 
         salvaged_sha = None
@@ -776,9 +848,25 @@ async def _run_agent_with_workspace(
             config=cfg,
         )
 
-        # Branch preserves the salvage commit — remove only the worktree.
-        with contextlib.suppress(Exception):
-            cleanup_workspace(workspace, delete_branch=False, config=cfg)
+        # Branch preserves the salvage commit. Archive the worktree so the
+        # files survive for forensics (same principle that makes successful
+        # tasks land in _archive/) — agents and humans can inspect the full
+        # state that led to the failure, not just the final commit.
+        try:
+            archive_path, archive_events = archive_workspace(workspace, "salvaged", config=cfg)
+            if archive_path:
+                log.info(
+                    "workspace_archived",
+                    f"Archived salvaged worktree to {archive_path}",
+                    {"task_id": task_id, "archive": str(archive_path)},
+                )
+            _handle_workspace_events(archive_events, phase="archive")
+        except Exception as e:
+            log.error(
+                "workspace_archive_failed",
+                f"Salvage-archive failed: {e}",
+                {"task_id": task_id, "error": str(e)},
+            )
 
     try:
         # --- Create workspace ---
@@ -786,9 +874,18 @@ async def _run_agent_with_workspace(
         workspace = create_workspace(task_id, config=cfg)
         log.info(
             "workspace_created",
-            f"Workspace ready: {workspace.branch} at {workspace.worktree_path}",
-            {"task_id": task_id, "branch": workspace.branch, "worktree": str(workspace.worktree_path)},
+            f"Workspace ready: {workspace.branch} at {workspace.worktree_path} (attempt {workspace.attempt})",
+            {
+                "task_id": task_id,
+                "branch": workspace.branch,
+                "worktree": str(workspace.worktree_path),
+                "attempt": workspace.attempt,
+            },
         )
+        # Surface any anomalies from create (leftover archived, fetch failed,
+        # per-attempt path used). Logged for every event; notified for the
+        # ones worth waking a human up over.
+        _handle_workspace_events(workspace.events, phase="create")
 
         # --- Setup workspace ---
         if cfg.project_setup_commands:
@@ -798,7 +895,22 @@ async def _run_agent_with_workspace(
                 log.error("workspace_setup_failed", "Setup commands failed", {"task_id": task_id})
                 aios.fail_task(task_id, f"Workspace setup failed:\n{setup_output[-2000:]}", config=cfg)
                 # Setup failed before the agent ran — no work to preserve.
-                cleanup_workspace(workspace, delete_branch=True, config=cfg)
+                ok, steps, err = cleanup_workspace(workspace, delete_branch=True, config=cfg)
+                if not ok:
+                    _handle_workspace_events(
+                        [
+                            WorkspaceEvent(
+                                kind="cleanup_failed",
+                                message=f"Cleanup after setup-failure left state behind: {err}",
+                                detail={
+                                    "path": str(workspace.worktree_path),
+                                    "steps": steps,
+                                    "error": err or "",
+                                },
+                            )
+                        ],
+                        phase="cleanup",
+                    )
                 return
 
         # --- Build prompts with workspace context ---
@@ -966,6 +1078,66 @@ async def _run_agent_with_workspace(
             push_ok, push_output = push_workspace(workspace, config=cfg)
             if push_ok:
                 log.info("workspace_pushed", f"Pushed {workspace.branch}", {"task_id": task_id})
+                # --- Open a pull request (GitHub only; non-fatal) ---
+                pr_ok, pr_url, pr_message = open_pull_request(workspace, task_meta, agent_config.agent_id, config=cfg)
+                if pr_ok and pr_url:
+                    log.info(
+                        "workspace_pr_opened",
+                        f"Opened PR: {pr_url}",
+                        {"task_id": task_id, "branch": workspace.branch, "url": pr_url},
+                    )
+                    send_notification(
+                        NotificationEvent(
+                            event_type="workspace_pr_opened",
+                            severity="info",
+                            title=f"PR opened for task {task_id}",
+                            detail=(
+                                f"Task {task_id} completed and a pull request was opened.\n\n"
+                                f"URL: {pr_url}\n"
+                                f"Branch: `{workspace.branch}`\n"
+                                f"Commit: {sha[:8]}"
+                            ),
+                            agent_id=agent_config.agent_id,
+                            refs={
+                                "task_id": task_id,
+                                "branch": workspace.branch,
+                                "url": pr_url,
+                                "sha": sha,
+                            },
+                        ),
+                        config=cfg,
+                    )
+                elif pr_ok:
+                    # Intentional skip — not an error, but log so the reason
+                    # is discoverable ("PR disabled", "non-GitHub remote", etc).
+                    log.info(
+                        "workspace_pr_skipped",
+                        f"PR creation skipped: {pr_message}",
+                        {"task_id": task_id, "branch": workspace.branch, "reason": pr_message},
+                    )
+                else:
+                    log.error(
+                        "workspace_pr_failed",
+                        f"PR creation failed (non-fatal): {pr_message}",
+                        {"task_id": task_id, "branch": workspace.branch, "error": pr_message},
+                    )
+                    send_notification(
+                        NotificationEvent(
+                            event_type="workspace_pr_failed",
+                            severity="warning",
+                            title=f"PR creation failed for task {task_id}",
+                            detail=(
+                                f"Branch `{workspace.branch}` was pushed successfully but the "
+                                f"follow-up `gh pr create` call failed. Task is still marked "
+                                f"done — the branch is on the remote and a PR can be opened "
+                                f"manually.\n\n"
+                                f"Error:\n{pr_message[:500]}"
+                            ),
+                            agent_id=agent_config.agent_id,
+                            refs={"task_id": task_id, "branch": workspace.branch, "sha": sha},
+                        ),
+                        config=cfg,
+                    )
             else:
                 # Push failure is non-fatal for THIS task (the commit is in
                 # the agent branch locally), but if nothing ever pushes, work
@@ -1025,11 +1197,25 @@ async def _run_agent_with_workspace(
                 ),
                 config=cfg,
             )
-            cleanup_workspace(workspace, delete_branch=False, config=cfg)
+            archive_path, archive_events = archive_workspace(workspace, "in_review", config=cfg)
+            if archive_path:
+                log.info(
+                    "workspace_archived",
+                    f"Archived worktree to {archive_path}",
+                    {"task_id": task_id, "archive": str(archive_path)},
+                )
+            _handle_workspace_events(archive_events, phase="archive")
         else:
             aios.complete_task(task_id, config=cfg)
             log.info("completed_task", f"Completed {task_id}", {"task_id": task_id, "branch": workspace.branch})
-            cleanup_workspace(workspace, config=cfg)
+            archive_path, archive_events = archive_workspace(workspace, "completed", config=cfg)
+            if archive_path:
+                log.info(
+                    "workspace_archived",
+                    f"Archived worktree to {archive_path}",
+                    {"task_id": task_id, "archive": str(archive_path)},
+                )
+            _handle_workspace_events(archive_events, phase="archive")
 
     except WorkspaceError as e:
         log.error("workspace_error", str(e), {"task_id": task_id})

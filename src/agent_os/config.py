@@ -183,6 +183,21 @@ class Config:
     project_commit_author_name: str = ""
     project_agent_commit_authors: dict[str, dict[str, str]] = field(default_factory=dict)
 
+    # Pull request creation — runs after a successful push. GitHub-only for
+    # now (uses `gh pr create`); if the remote isn't GitHub we skip with a
+    # warning notification rather than failing the task. A failed PR open
+    # never fails the task; the branch is already pushed.
+    project_pull_request_enabled: bool = True
+    project_pull_request_draft: bool = False
+    project_pull_request_base_branch: str = ""  # empty = use project_default_branch
+
+    # Worktree archive — on cleanup we move the worktree to
+    # {worktrees_root}/_archive/{task-id}__{status}__{timestamp}/ instead of
+    # deleting. Keeps last N; older are pruned. Gives humans forensic material
+    # after a failure and lets agents inspect prior attempts.
+    project_archive_enabled: bool = True
+    project_archive_keep_last: int = 10
+
     # --- Budget & turn limits (per-invocation) ---
 
     # Standard task invocation
@@ -464,6 +479,22 @@ class Config:
         if agent_authors:
             kwargs["project_agent_commit_authors"] = {agent_id: dict(v) for agent_id, v in agent_authors.items()}
 
+        # [project.pull_request]
+        pr = project.get("pull_request", {})
+        if "enabled" in pr:
+            kwargs["project_pull_request_enabled"] = bool(pr["enabled"])
+        if "draft" in pr:
+            kwargs["project_pull_request_draft"] = bool(pr["draft"])
+        if "base_branch" in pr:
+            kwargs["project_pull_request_base_branch"] = str(pr["base_branch"])
+
+        # [project.archive]
+        archive_cfg = project.get("archive", {})
+        if "enabled" in archive_cfg:
+            kwargs["project_archive_enabled"] = bool(archive_cfg["enabled"])
+        if "keep_last" in archive_cfg:
+            kwargs["project_archive_keep_last"] = int(archive_cfg["keep_last"])
+
         return cls(**kwargs)
 
     @classmethod
@@ -634,6 +665,15 @@ class Config:
         """Absolute path to the worktrees directory."""
         p = Path(self.project_worktrees_dir)
         return p if p.is_absolute() else self.company_root / p
+
+    @property
+    def worktrees_archive_root(self) -> Path:
+        """Absolute path to the worktree archive directory.
+
+        Preserved worktrees from completed/failed/salvaged tasks land here
+        so the active worktree path is never blocked by leftover state.
+        """
+        return self.worktrees_root / "_archive"
 
 
 # --- Singleton ---
