@@ -63,13 +63,14 @@ When an agent with role `Software Engineer` (or any role in `builder_roles`) cla
 
 ### What happens when you claim a code task
 
-1. **agent-os creates a worktree** — `git worktree add` makes an isolated branch `agent/{task-id}` from the default branch. Your working directory becomes the worktree, not the main repo.
+1. **agent-os creates a worktree** — `git worktree add` makes an isolated branch `agent/{task-id}` from the freshly-fetched remote default branch (not a stale local ref). Your working directory becomes the worktree, not the main repo.
 2. **Setup runs** — agent-os executes `[project.setup].commands` (e.g., `npm install`) in the worktree.
 3. **You work** — your file tools (Read, Write, Edit, Bash) operate on the isolated code. You see a normal working directory. You don't need to know it's a worktree.
 4. **Validation runs** — agent-os executes `[project.validate].commands` (e.g., `pytest`, `ruff check .`).
 5. **Retry (if configured)** — if validation fails and `on_failure = "retry"`, you get another turn with the error output. Fix it and continue.
 6. **agent-os commits and pushes** — `git add -A && git commit` with an auto-generated message, then `git push` to remote.
-7. **Task completes** — moved to `done/`, worktree removed.
+7. **agent-os opens a pull request** — on GitHub remotes, agent-os runs `gh pr create` automatically (configurable; see `[project.pull_request]` in the config reference). On non-GitHub remotes, or if PR creation is disabled, this step is skipped with a log line explaining why.
+8. **Task completes** — moved to `done/`. The worktree is moved to `.worktrees/_archive/` (not deleted) so the files survive for forensics and cross-attempt comparison.
 
 ### What YOU do as an agent in workspace mode
 
@@ -104,6 +105,32 @@ Setting up the workspace SDLC on a new host is a few manual steps — SSH deploy
 ### Push failures
 
 If a push fails (e.g., the deploy key is missing or expired), agent-os logs the error at ERROR level, sends a **critical notification** (`event_type: workspace_push_failed`), and still completes the task locally. The commit is in the agent branch on-disk but not on the remote. Fix push auth (`agent-os project check` shows the specific problem), and future tasks will push normally. If you need to recover the unpushed commits, they're on the `agent/{task-id}` branch in the repo.
+
+### PR creation failures
+
+If push succeeds but `gh pr create` fails (e.g., `gh` isn't authenticated, or the GitHub API errors), agent-os logs at ERROR level, fires a **warning notification** (`event_type: workspace_pr_failed`), and **still marks the task done** — the branch is on the remote, so no work is lost. Humans can open the PR manually. If PR creation is *intentionally* disabled or the remote isn't GitHub, the step is skipped quietly with an info log (no notification).
+
+### The worktree archive (`.worktrees/_archive/`)
+
+agent-os never blocks the active worktree path with leftover state. On every task outcome — success, failure with salvage, in-review — the worktree directory is **moved** (not deleted) to:
+
+```
+.worktrees/_archive/{task-id}__{status}__{timestamp}/
+```
+
+`{status}` is one of `completed`, `failed`, `salvaged`, `in_review`, or `leftover` (from a prior run that got cleared at the start of this one). The archive keeps the last N entries (default 10, configurable via `[project.archive].keep_last`). Older entries are pruned automatically.
+
+**What agents should do with `_archive/`:** it's a forensic resource. If a prior attempt at a task failed and you're retrying, the archive at `_archive/{your-task-id}__*` holds the files from that attempt — useful to see what was already tried. Do NOT write to `_archive/` as part of normal work; do NOT run git commands inside it (it's no longer a live worktree, just a flat directory).
+
+### Per-attempt paths (rare)
+
+If the primary worktree path `.worktrees/{task-id}/` cannot be freed at workspace-create time (e.g., leftover files owned by another user), agent-os falls back to `.worktrees/{task-id}__attempt-2/` (and 3, 4, …) with branch `agent/{task-id}--attempt-N`. This is logged and notified (`event_type: workspace_per_attempt_path_used`) because it almost always means a prior cleanup was impaired. Everything else works the same — the agent's cwd, commit, push, PR, and archive all operate on the fallback path.
+
+### Stale base detection
+
+If the initial `git fetch` fails during workspace create, the worktree is branched from the **local** default branch ref instead of the remote — which may be stale. This is logged and notified (`event_type: workspace_fetch_failed`) so humans know a later PR merge may conflict with updated main. Fix the fetch failure (network, auth), and subsequent tasks will use fresh remote state again.
+
+On every successful fetch, agent-os also **fast-forwards the base clone's local default branch** to match the remote, so long-running deployments don't accumulate drift between the local `main` ref and `origin/main`. The FF is strictly non-destructive — if local has diverged (someone committed directly to the base clone), we log a warning (`event_type: workspace_local_default_diverged`) and leave local alone rather than destroy work. In a properly-running service deployment this event should never fire; if it does, a human is committing to the base clone directly and that's the problem to fix.
 
 ---
 
@@ -205,6 +232,15 @@ author_name = "agent-os"
 # [project.commit.agent_authors.agent-001-maker]
 # email = "maker@example.com"
 # name   = "The Maker"
+
+[project.pull_request]           # Auto-open a PR after successful push
+enabled = true                   # GitHub-only; skipped quietly on other hosts
+draft = false                    # true → open as draft
+# base_branch = "main"           # defaults to [project].default_branch
+
+[project.archive]                # Worktree archival for forensics
+enabled = true
+keep_last = 10                   # Older archived worktrees pruned on each archive
 
 [budget]
 task = 5.00

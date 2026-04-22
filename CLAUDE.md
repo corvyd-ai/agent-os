@@ -300,20 +300,25 @@ When a `[project]` section is configured in `agent-os.toml`, builder agents (rol
 
 **Flow when a builder agent claims a task:**
 
-1. **Create workspace** — `git worktree add` creates an isolated branch `agent/{task-id}` from the default branch
+1. **Create workspace** — `git fetch {remote} {default_branch}`, then `git worktree add -b agent/{task-id} {path} {remote}/{default_branch}`. Branching from the fetched remote ref (not the local one) prevents PR-time conflicts from a stale base clone.
 2. **Setup** — runs `[project.setup].commands` in the worktree (e.g. `npm install`)
 3. **Agent works** — the SDK runs with `cwd` set to the worktree; agent's file tools operate on isolated code
 4. **Validate** — runs `[project.validate].commands` (e.g. `pytest`, `ruff check .`)
 5. **Retry** — if validation fails and `on_failure = "retry"`, the agent gets another chance with the error output
 6. **Commit + push** — `git add -A && git commit` with auto-generated message, then `git push` to remote
-7. **Complete + cleanup** — task moves to `done/`, worktree is removed
+7. **Open PR** — on GitHub remotes only, runs `gh pr create` automatically. Non-GitHub remotes are skipped with an info log (no notification). Configurable via `[project.pull_request]`.
+8. **Complete + archive** — task moves to `done/`. Worktree is moved (not deleted) to `.worktrees/_archive/{task-id}__{status}__{timestamp}/` for forensics; archive retains the last N entries (default 10).
 
 **Key design properties:**
 - MCP lifecycle tools (complete_task, send_message, etc.) always operate on the main company filesystem, never the worktree
 - Branch naming: `agent/{task-id}` — deterministic, unique, easy to find/clean
+- **The active worktree path is never blocked by leftover state.** On create, a leftover `.worktrees/{task-id}/` is archived (or force-cleaned) before a fresh workspace is made. If cleanup fails, agent-os falls back to a per-attempt path `{task-id}__attempt-N` with branch `agent/{task-id}--attempt-N` rather than getting stuck.
 - Push failures are non-fatal — work is committed locally
+- PR failures are non-fatal — branch is on the remote; humans can open the PR manually
 - No changes to commit = still completes the task (agent may have determined no changes needed)
 - Without `[project]` config, agents work exactly as before (no workspace, `cwd=company_root`)
+- **PR creation is GitHub-only** (via `gh pr create`). Non-GitHub remotes (GitLab, Bitbucket, self-hosted) are detected and the PR step is skipped. Adding providers requires extending `open_pull_request()` in `workspace.py`.
+- **Event visibility** — every anomaly during workspace create/cleanup (leftover archived, fetch failed, per-attempt used, cleanup failed) becomes a log line + (for notable kinds) a notification. Event types registered in `notifications.KNOWN_EVENT_TYPES` so `agent-os notifications events` lists them.
 
 ### Task Creation
 
@@ -364,6 +369,14 @@ commands = ["npm install"]
 commands = ["npm test", "npm run lint"]
 on_failure = "retry"
 max_retries = 2
+
+[project.pull_request]           # GitHub-only; skipped on other remotes
+enabled = true
+draft = false
+
+[project.archive]                # Worktree forensics archive
+enabled = true
+keep_last = 10
 
 [prompts]
 override_dir = "prompts"

@@ -7,11 +7,14 @@ import pytest
 
 from agent_os.config import Config
 from agent_os.workspace import (
+    _is_github_remote,
+    archive_workspace,
     cleanup_workspace,
     commit_workspace,
     create_workspace,
     get_workspace,
     has_uncommitted_changes,
+    open_pull_request,
     push_workspace,
     salvage_commit,
     setup_workspace,
@@ -710,3 +713,387 @@ max_retries = 1
         assert cfg.project_validate_on_failure == "fail"
         assert cfg.project_validate_max_retries == 1
         assert cfg.project_enabled is True
+
+
+# ── Workspace hardening (Apr 2026): archive, per-attempt, PR creation ──
+
+
+class TestCleanupWorkspaceReturnShape:
+    """cleanup_workspace now returns (success, steps, error) so the runner
+    can log + notify when cleanup falls through last-resort steps."""
+
+    def test_returns_success_tuple_on_happy_path(self, project_config):
+        ws = create_workspace("task-rs-001", config=project_config)
+        result = cleanup_workspace(ws, delete_branch=True, config=project_config)
+        assert isinstance(result, tuple) and len(result) == 3
+        success, steps, err = result
+        assert success is True
+        assert "worktree_remove_force" in steps
+        assert err is None
+
+    def test_succeeds_when_path_already_gone(self, project_config):
+        ws = create_workspace("task-rs-002", config=project_config)
+        import shutil as _sh
+
+        _sh.rmtree(ws.worktree_path)
+        success, _steps, _err = cleanup_workspace(ws, delete_branch=True, config=project_config)
+        assert success is True
+
+
+class TestArchiveWorkspace:
+    def test_moves_worktree_to_archive_dir(self, project_config):
+        ws = create_workspace("task-ar-001", config=project_config)
+        (ws.worktree_path / "artifact.txt").write_text("work product\n")
+
+        archive_path, events = archive_workspace(ws, "completed", config=project_config)
+        assert archive_path is not None
+        assert archive_path.parent == project_config.worktrees_archive_root
+        assert archive_path.name.startswith("task-ar-001__completed__")
+        assert not ws.worktree_path.exists()
+        assert (archive_path / "artifact.txt").read_text() == "work product\n"
+        # Archive events on a happy path with no pruning should be empty.
+        assert all(e.kind != "archive_move_failed" for e in events)
+
+    def test_prunes_old_archives_to_keep_last(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=False,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+            project_archive_enabled=True,
+            project_archive_keep_last=2,
+        )
+        # Create + archive 4 workspaces. Only the 2 most recent should remain.
+        archive_paths = []
+        for i in range(4):
+            ws = create_workspace(f"task-pr-{i:03d}", config=cfg)
+            (ws.worktree_path / "x.txt").write_text(str(i))
+            path, _events = archive_workspace(ws, "completed", config=cfg)
+            archive_paths.append(path)
+            # Ensure timestamp ordering is well-defined even on fast filesystems.
+            import time as _t
+
+            _t.sleep(0.01)
+
+        remaining = sorted(cfg.worktrees_archive_root.iterdir())
+        assert len(remaining) == 2
+        # The two most recent archives should be the ones kept.
+        assert archive_paths[-1] in remaining
+        assert archive_paths[-2] in remaining
+        assert archive_paths[0] not in remaining
+        assert archive_paths[1] not in remaining
+
+    def test_falls_through_to_cleanup_when_disabled(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=False,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+            project_archive_enabled=False,
+        )
+        ws = create_workspace("task-ar-off-001", config=cfg)
+        archive_path, _events = archive_workspace(ws, "completed", config=cfg)
+        assert archive_path is None
+        assert not ws.worktree_path.exists()
+        # Archive root should NOT have been created.
+        assert not cfg.worktrees_archive_root.exists() or not list(cfg.worktrees_archive_root.iterdir())
+
+    def test_handles_missing_worktree_gracefully(self, project_config):
+        ws = create_workspace("task-ar-miss-001", config=project_config)
+        import shutil as _sh
+
+        _sh.rmtree(ws.worktree_path)
+        archive_path, events = archive_workspace(ws, "completed", config=project_config)
+        assert archive_path is None
+        # No error events — nothing to do was the correct outcome.
+        assert all(e.kind != "archive_move_failed" for e in events)
+
+
+class TestCreateWorkspaceHardening:
+    def test_archives_leftover_worktree_on_retry(self, project_config):
+        # First run leaves a worktree behind (simulate interrupted cleanup).
+        ws1 = create_workspace("task-hd-001", config=project_config)
+        (ws1.worktree_path / "partial.txt").write_text("from attempt 1")
+
+        # Second create with the same task-id should archive the leftover,
+        # emit an event, and get the primary path back.
+        ws2 = create_workspace("task-hd-001", config=project_config)
+        assert ws2.worktree_path == ws1.worktree_path  # primary path reused
+        assert ws2.attempt == 1
+        archive_kinds = [e.kind for e in ws2.events]
+        assert "existing_worktree_archived" in archive_kinds
+        # The partial work should now be sitting in the archive.
+        archives = list(project_config.worktrees_archive_root.iterdir())
+        assert any((a / "partial.txt").exists() for a in archives)
+        cleanup_workspace(ws2, delete_branch=True, config=project_config)
+
+    def test_falls_back_to_per_attempt_when_primary_cannot_be_freed(self, project_config, monkeypatch):
+        """If both archive-move AND force-cleanup fail, create_workspace
+        must fall back to a per-attempt path rather than blocking the task."""
+        ws1 = create_workspace("task-hd-002", config=project_config)
+        # Write some content so the primary path definitely exists.
+        (ws1.worktree_path / "x.txt").write_text("x")
+
+        # Sabotage both archive move and force-cleanup by making the path
+        # un-removable. We do it by monkeypatching shutil.move AND the
+        # internal _force_cleanup_worktree to pretend they failed.
+        import agent_os.workspace as wm
+
+        def _fake_move(src, dst):
+            raise OSError("simulated archive failure")
+
+        def _fake_force(path, branch, *, repo):
+            return False, ["worktree_remove_force_failed"], "simulated cleanup failure"
+
+        monkeypatch.setattr(wm.shutil, "move", _fake_move)
+        monkeypatch.setattr(wm, "_force_cleanup_worktree", _fake_force)
+
+        ws2 = create_workspace("task-hd-002", config=project_config)
+        assert ws2.attempt >= 2
+        assert ws2.branch.startswith("agent/task-hd-002--attempt-")
+        kinds = [e.kind for e in ws2.events]
+        assert "per_attempt_path_used" in kinds
+        # Cleanup only ws2 — ws1 is "stuck" by the monkeypatch, but the test
+        # sandbox is torn down by tmp_path so it doesn't matter.
+        monkeypatch.undo()
+        cleanup_workspace(ws2, delete_branch=True, config=project_config)
+
+
+class TestOpenPullRequest:
+    def test_skipped_when_pr_disabled(self, project_config):
+        cfg = Config(
+            company_root=project_config.company_root,
+            project_repo_path=project_config.project_repo_path,
+            project_default_branch=project_config.project_default_branch,
+            project_push=True,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(project_config.worktrees_root),
+            project_pull_request_enabled=False,
+        )
+        ws = create_workspace("task-pr-001", config=cfg)
+        ok, url, msg = open_pull_request(ws, {"id": "task-pr-001", "title": "t"}, "agent-001", config=cfg)
+        assert ok is True
+        assert url is None
+        assert "disabled" in msg.lower()
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_skipped_when_push_disabled(self, project_config):
+        # project_config has project_push=False by default.
+        ws = create_workspace("task-pr-002", config=project_config)
+        ok, url, msg = open_pull_request(ws, {"id": "task-pr-002", "title": "t"}, "agent-001", config=project_config)
+        assert ok is True
+        assert url is None
+        assert "push" in msg.lower()
+        cleanup_workspace(ws, delete_branch=True, config=project_config)
+
+    def test_skipped_when_no_remote(self, git_repo, tmp_path):
+        cfg = Config(
+            company_root=git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=True,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-pr-003", config=cfg)
+        ok, url, msg = open_pull_request(ws, {"id": "task-pr-003", "title": "t"}, "agent-001", config=cfg)
+        assert ok is True
+        assert url is None
+        assert "not configured" in msg.lower()
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_skipped_when_remote_is_not_github(self, git_repo, tmp_path):
+        # Add a non-GitHub remote.
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://gitlab.com/fake/repo.git"],
+            cwd=str(git_repo),
+            capture_output=True,
+            check=True,
+        )
+        cfg = Config(
+            company_root=git_repo,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=True,
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+        ws = create_workspace("task-pr-004", config=cfg)
+        ok, url, msg = open_pull_request(ws, {"id": "task-pr-004", "title": "t"}, "agent-001", config=cfg)
+        assert ok is True
+        assert url is None
+        assert "not a github" in msg.lower()
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_pr_config_parsed_from_toml(self, tmp_path):
+        toml = tmp_path / "agent-os.toml"
+        toml.write_text(
+            """
+[company]
+name = "Test"
+
+[project.pull_request]
+enabled = false
+draft = true
+base_branch = "develop"
+
+[project.archive]
+enabled = false
+keep_last = 5
+"""
+        )
+        cfg = Config.from_toml(toml)
+        assert cfg.project_pull_request_enabled is False
+        assert cfg.project_pull_request_draft is True
+        assert cfg.project_pull_request_base_branch == "develop"
+        assert cfg.project_archive_enabled is False
+        assert cfg.project_archive_keep_last == 5
+
+
+class TestFastForwardLocalDefaultBranch:
+    """create_workspace must keep the base clone's local default branch in
+    sync with origin so long-running deployments don't accumulate drift."""
+
+    def _setup_remote_and_clone(self, tmp_path):
+        """Build a bare remote + a clone that tracks it. Returns (clone, bare)."""
+        bare = tmp_path / "bare.git"
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(bare)],
+            capture_output=True,
+            check=True,
+        )
+        clone = tmp_path / "clone"
+        subprocess.run(
+            ["git", "clone", str(bare), str(clone)],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(clone), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(clone), capture_output=True, check=True)
+        (clone / "README.md").write_text("# init\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(clone), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=str(clone), capture_output=True, check=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=str(clone), capture_output=True, check=True)
+        return clone, bare
+
+    def _advance_remote(self, tmp_path, bare):
+        """Push a second commit to the bare remote via a throwaway clone."""
+        tmp_clone = tmp_path / "tmp_clone"
+        subprocess.run(
+            ["git", "clone", str(bare), str(tmp_clone)],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(["git", "config", "user.email", "t2@t"], cwd=str(tmp_clone), capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "T2"], cwd=str(tmp_clone), capture_output=True, check=True)
+        (tmp_clone / "CHANGELOG.md").write_text("# new\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_clone), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "advance"], cwd=str(tmp_clone), capture_output=True, check=True)
+        subprocess.run(["git", "push", "origin", "main"], cwd=str(tmp_clone), capture_output=True, check=True)
+        # Capture the new remote HEAD for assertions.
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(tmp_clone),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return head.stdout.strip()
+
+    def _tree(self, company_root):
+        for sub in ("queued", "in-progress", "done", "failed", "backlog", "declined", "in-review"):
+            (company_root / "agents" / "tasks" / sub).mkdir(parents=True, exist_ok=True)
+
+    def test_fast_forwards_local_when_remote_is_ahead(self, tmp_path):
+        clone, bare = self._setup_remote_and_clone(tmp_path)
+        new_head = self._advance_remote(tmp_path, bare)
+        self._tree(clone)
+
+        cfg = Config(
+            company_root=clone,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=True,
+            project_remote="origin",
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+
+        # Precondition: clone's local main is behind remote.
+        before = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=str(clone),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert before != new_head
+
+        ws = create_workspace("task-ff-001", config=cfg)
+
+        after = subprocess.run(
+            ["git", "rev-parse", "main"],
+            cwd=str(clone),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert after == new_head, "local main should be fast-forwarded to origin/main"
+        # No divergence event should have been recorded.
+        assert all(e.kind != "local_default_diverged" for e in ws.events)
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+    def test_records_divergence_when_local_has_own_commits(self, tmp_path):
+        clone, bare = self._setup_remote_and_clone(tmp_path)
+        # Advance both local AND remote independently so they diverge.
+        self._advance_remote(tmp_path, bare)
+        (clone / "LOCAL_ONLY.md").write_text("local\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(clone), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "local-only"], cwd=str(clone), capture_output=True, check=True)
+        self._tree(clone)
+
+        cfg = Config(
+            company_root=clone,
+            project_repo_path=".",
+            project_default_branch="main",
+            project_push=True,
+            project_remote="origin",
+            project_validate_commands=["true"],
+            project_worktrees_dir=str(tmp_path / "worktrees"),
+        )
+
+        local_head_before = subprocess.run(
+            ["git", "rev-parse", "main"], cwd=str(clone), capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        ws = create_workspace("task-ff-002", config=cfg)
+
+        local_head_after = subprocess.run(
+            ["git", "rev-parse", "main"], cwd=str(clone), capture_output=True, text=True, check=True
+        ).stdout.strip()
+        # Local must not have been touched — we preserved the divergent commit.
+        assert local_head_after == local_head_before
+        # But the event should have been recorded.
+        assert any(e.kind == "local_default_diverged" for e in ws.events)
+        cleanup_workspace(ws, delete_branch=True, config=cfg)
+
+
+class TestIsGithubRemote:
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://github.com/owner/repo.git", True),
+            ("git@github.com:owner/repo.git", True),
+            ("ssh://git@github.com/owner/repo", True),
+            ("https://gitlab.com/owner/repo.git", False),
+            ("https://bitbucket.org/owner/repo.git", False),
+            ("https://git.example.com/owner/repo.git", False),
+            ("", False),
+        ],
+    )
+    def test_github_detection(self, url, expected):
+        assert _is_github_remote(url) is expected
