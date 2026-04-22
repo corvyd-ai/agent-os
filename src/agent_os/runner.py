@@ -1271,46 +1271,46 @@ async def run_drive_consultation(
     expected_at = _now_iso()  # Drive consultations run on cron schedule; expected = now
     log.info("drive_consultation_start", "Consulting drives (scheduled)", {"expected_at": expected_at})
 
-    journal = aios.read_journal(agent_key, max_entries=5, config=cfg)
-    journal_context = ""
-    if journal:
-        journal_context = f"\n\n# Your Recent Journal Entries\n\n{journal}"
-
-    system_prompt = composer.build_system_prompt(agent_config) + journal_context
-
-    company_drives = aios.read_drives(config=cfg)
-    proposals = aios.list_active_proposals(config=cfg)
-    if proposals:
-        proposals_text = "\n\n".join(
-            f"### {meta.get('title', 'Untitled')} "
-            f"(by {meta.get('proposed_by', 'unknown')}, {meta.get('date', '?')})\n\n"
-            f"**File**: {path.name}\n\n{body}"
-            for meta, body, path in proposals
-        )
-    else:
-        proposals_text = "(No active proposals)"
-
-    prompt = composer.render_template(
-        "drive_consultation.jinja2",
-        company_drives=company_drives or "(No company drives document yet)",
-        active_proposals=proposals_text,
-        agent_id=agent_key,
-    )
-
-    os.environ.pop("CLAUDECODE", None)
-    _ensure_api_key()
-
-    stderr_capture = StderrCapture(agent_key)
-    options = _make_options(
-        agent_config,
-        system_prompt,
-        config=cfg,
-        max_turns=max_turns or cfg.drive_consultation_max_turns,
-        max_budget_usd=max_budget_usd or cfg.drive_consultation_max_budget_usd,
-        stderr_capture=stderr_capture,
-    )
-
     try:
+        journal = aios.read_journal(agent_key, max_entries=5, config=cfg)
+        journal_context = ""
+        if journal:
+            journal_context = f"\n\n# Your Recent Journal Entries\n\n{journal}"
+
+        system_prompt = composer.build_system_prompt(agent_config) + journal_context
+
+        company_drives = aios.read_drives(config=cfg)
+        proposals = aios.list_active_proposals(config=cfg)
+        if proposals:
+            proposals_text = "\n\n".join(
+                f"### {meta.get('title', 'Untitled')} "
+                f"(by {meta.get('proposed_by', 'unknown')}, {meta.get('date', '?')})\n\n"
+                f"**File**: {path.name}\n\n{body}"
+                for meta, body, path in proposals
+            )
+        else:
+            proposals_text = "(No active proposals)"
+
+        prompt = composer.render_template(
+            "drive_consultation.jinja2",
+            company_drives=company_drives or "(No company drives document yet)",
+            active_proposals=proposals_text,
+            agent_id=agent_key,
+        )
+
+        os.environ.pop("CLAUDECODE", None)
+        _ensure_api_key()
+
+        stderr_capture = StderrCapture(agent_key)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            max_turns=max_turns or cfg.drive_consultation_max_turns,
+            max_budget_usd=max_budget_usd or cfg.drive_consultation_max_budget_usd,
+            stderr_capture=stderr_capture,
+        )
+
         result_msg = await _run_query(
             prompt,
             options,
@@ -1318,8 +1318,9 @@ async def run_drive_consultation(
             stderr_capture=stderr_capture,
             max_retries=1,
         )
-    except RuntimeError as e:
-        error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
+    except Exception as e:
+        stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+        error_refs = _error_classifier.build_error_refs(e.__cause__ or e if e.__cause__ else e, stderr_text)
         log.error("drive_consultation_error", str(e), error_refs)
         return
 
@@ -1360,28 +1361,28 @@ async def run_dream_cycle(
     log = get_logger(agent_key)
     log.info("dream_start", "Entering dream cycle (nightly memory reorganization)")
 
-    system_prompt = composer.build_system_prompt(agent_config)
-
-    prompt = composer.render_template("dream.jinja2", agent_id=agent_key)
-
-    os.environ.pop("CLAUDECODE", None)
-    _ensure_api_key()
-
-    dream_model = cfg.dream_model
-    log.debug("dream_model", f"Dream model: {dream_model}", {"model": dream_model})
-
-    stderr_capture = StderrCapture(agent_key)
-    options = _make_options(
-        agent_config,
-        system_prompt,
-        config=cfg,
-        max_turns=max_turns or cfg.dream_max_turns,
-        max_budget_usd=max_budget_usd or cfg.dream_max_budget_usd,
-        model=dream_model,
-        stderr_capture=stderr_capture,
-    )
-
     try:
+        system_prompt = composer.build_system_prompt(agent_config)
+
+        prompt = composer.render_template("dream.jinja2", agent_id=agent_key)
+
+        os.environ.pop("CLAUDECODE", None)
+        _ensure_api_key()
+
+        dream_model = cfg.dream_model
+        log.debug("dream_model", f"Dream model: {dream_model}", {"model": dream_model})
+
+        stderr_capture = StderrCapture(agent_key)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            max_turns=max_turns or cfg.dream_max_turns,
+            max_budget_usd=max_budget_usd or cfg.dream_max_budget_usd,
+            model=dream_model,
+            stderr_capture=stderr_capture,
+        )
+
         result_msg = await _run_query(
             prompt,
             options,
@@ -1389,8 +1390,9 @@ async def run_dream_cycle(
             stderr_capture=stderr_capture,
             max_retries=1,
         )
-    except RuntimeError as e:
-        error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text)
+    except Exception as e:
+        stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+        error_refs = _error_classifier.build_error_refs(e.__cause__ or e if e.__cause__ else e, stderr_text)
         log.error("dream_error", str(e), error_refs)
         return
 
@@ -1858,8 +1860,10 @@ async def run_standing_orders(
                 stderr_capture=stderr_capture,
                 max_retries=2,
             )
-        except RuntimeError as e:
-            error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_capture.text, order=order_name)
+        except Exception as e:
+            error_refs = _error_classifier.build_error_refs(
+                e.__cause__ or e if e.__cause__ else e, stderr_capture.text, order=order_name
+            )
             log.error(
                 "standing_order_error",
                 f"Error in standing order '{order_name}': {e}",
