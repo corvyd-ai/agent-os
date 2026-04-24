@@ -8,7 +8,15 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_os.cli import INIT_DIRS, _find_repo_root, cmd_budget, cmd_init, cmd_update
+from agent_os.cli import (
+    _CRON_MARKER,
+    INIT_DIRS,
+    _build_cron_line,
+    _find_repo_root,
+    cmd_budget,
+    cmd_init,
+    cmd_update,
+)
 from agent_os.config import Config
 
 # ── init command ────────────────────────────────────────────────────
@@ -535,3 +543,66 @@ def test_cli_registers_notifications_subcommands():
         args = parser.parse_args(cmd)
         assert args.command == "notifications"
         assert args.notif_action == cmd[1]
+
+
+# ── cron line construction ─────────────────────────────────────────
+
+
+class TestBuildCronLine:
+    """Tests for _build_cron_line shell-escaping."""
+
+    def test_safe_path_unquoted(self, tmp_path):
+        """A simple path without metacharacters produces a valid cron line."""
+        toml = tmp_path / "agent-os.toml"
+        log_dir = tmp_path / "logs"
+        line = _build_cron_line(toml, log_dir)
+        assert _CRON_MARKER in line
+        assert "agent-os tick --config" in line
+
+    def test_semicolon_in_path_is_escaped(self, tmp_path):
+        """A semicolon in the path must be quoted so cron doesn't execute a second command."""
+        evil = tmp_path / "evil;rm -rf /"
+        toml = evil / "agent-os.toml"
+        log_dir = evil / "logs"
+        line = _build_cron_line(toml, log_dir)
+        assert f"'{toml}'" in line
+        assert f" {toml} " not in line
+        assert f" {toml}\n" not in line
+
+    def test_backtick_in_path_is_escaped(self, tmp_path):
+        """Backticks in a path must not trigger command substitution."""
+        evil = tmp_path / "x`id`y"
+        toml = evil / "agent-os.toml"
+        log_dir = evil / "logs"
+        line = _build_cron_line(toml, log_dir)
+        assert f"'{toml}'" in line
+
+    def test_dollar_paren_in_path_is_escaped(self, tmp_path):
+        """$() in a path must not trigger command substitution."""
+        evil = tmp_path / "x$(whoami)y"
+        toml = evil / "agent-os.toml"
+        log_dir = evil / "logs"
+        line = _build_cron_line(toml, log_dir)
+        assert f"'{toml}'" in line
+
+    def test_space_in_path_is_escaped(self, tmp_path):
+        """Spaces in paths must be handled (quoted)."""
+        spaced = tmp_path / "my company"
+        toml = spaced / "agent-os.toml"
+        log_dir = spaced / "logs"
+        line = _build_cron_line(toml, log_dir)
+        assert f"'{toml}'" in line
+        assert f"'{log_dir / 'scheduler.log'}'" in line
+
+    def test_single_quote_in_path_is_escaped(self, tmp_path):
+        """Single quotes in a path must be safely escaped by shlex.quote."""
+        import shlex
+
+        evil = tmp_path / "it's"
+        toml = evil / "agent-os.toml"
+        log_dir = evil / "logs"
+        line = _build_cron_line(toml, log_dir)
+        assert "it's/agent-os.toml" not in line
+        parts = shlex.split(line.replace(">>", "REDIR").replace("2>&1", "STDERR"))
+        config_idx = parts.index("--config") + 1
+        assert str(toml) == parts[config_idx]

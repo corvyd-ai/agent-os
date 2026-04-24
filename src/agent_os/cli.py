@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -1086,6 +1087,13 @@ def _read_git_tags(repo_root: Path, *, since: str | None = None) -> list[tuple[s
 _CRON_MARKER = "# agent-os-tick"
 
 
+def _build_cron_line(toml_path: Path, log_dir: Path) -> str:
+    """Build the crontab entry with shell-safe paths."""
+    safe_toml = shlex.quote(str(toml_path))
+    safe_log = shlex.quote(str(log_dir / "scheduler.log"))
+    return f"* * * * * agent-os tick --config {safe_toml} >> {safe_log} 2>&1 {_CRON_MARKER}"
+
+
 def _find_toml_path(args) -> Path:
     """Resolve the absolute path to the agent-os.toml config file."""
     config_path = getattr(args, "config", None)
@@ -1133,7 +1141,7 @@ def cmd_cron(args):
         toml_path = _find_toml_path(args)
         log_dir = toml_path.parent / "company" / "operations" / "logs"
 
-        cron_line = f"* * * * * agent-os tick --config {toml_path} >> {log_dir}/scheduler.log 2>&1 {_CRON_MARKER}"
+        cron_line = _build_cron_line(toml_path, log_dir)
 
         current = _get_current_crontab()
         if _CRON_MARKER in current:
