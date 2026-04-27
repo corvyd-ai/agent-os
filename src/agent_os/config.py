@@ -112,6 +112,7 @@ class Config:
     schedule_drives_enabled: bool = True
     schedule_drives_weekday_times: list[str] = field(default_factory=lambda: ["17:00"])
     schedule_drives_weekend_times: list[str] = field(default_factory=lambda: ["13:00"])
+    schedule_drives_stagger_minutes: int = 10
     schedule_dreams_enabled: bool = True
     schedule_dreams_time: str = "02:00"
     schedule_dreams_stagger_minutes: int = 10
@@ -324,6 +325,8 @@ class Config:
             kwargs["schedule_drives_weekday_times"] = list(drives["weekday_times"])
         if "weekend_times" in drives:
             kwargs["schedule_drives_weekend_times"] = list(drives["weekend_times"])
+        if "stagger_minutes" in drives:
+            kwargs["schedule_drives_stagger_minutes"] = int(drives["stagger_minutes"])
 
         # [schedule.dreams]
         dreams = schedule.get("dreams", {})

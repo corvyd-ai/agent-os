@@ -540,16 +540,24 @@ class TestStandingOrdersMultiAgent:
 
 
 class TestDrivesMultiAgent:
-    """Drive consultations must dispatch to all agents at the scheduled time."""
+    """Drive consultations must dispatch to all agents across staggered ticks.
+
+    Drives now follow the same per-agent stagger pattern as dreams. With
+    ``stagger_minutes=0`` they all fire at the base drive time (legacy
+    behavior); with ``stagger_minutes>0`` each agent fires at
+    ``base + idx * stagger`` so a single tick can never serialize all N
+    agents and silently drop the late ones.
+    """
 
     @pytest.mark.asyncio
-    async def test_all_agents_receive_drive_consultation(self, tmp_path):
-        """At a scheduled drive time, all agents should be dispatched."""
+    async def test_all_agents_receive_drive_consultation_with_zero_stagger(self, tmp_path):
+        """With stagger=0, all agents should dispatch at the base drive time."""
         cfg = _make_minimal_cfg(
             tmp_path,
             schedule_drives_enabled=True,
             schedule_drives_weekday_times=["17:00"],
             schedule_drives_weekend_times=["13:00"],
+            schedule_drives_stagger_minutes=0,
         )
 
         # Tuesday at 17:00
@@ -560,7 +568,6 @@ class TestDrivesMultiAgent:
             patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
             patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
             patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
-            patch("agent_os.scheduler._is_time_match", side_effect=lambda t, **kw: t == "17:00"),
             patch("agent_os.scheduler._is_weekend", return_value=False),
             patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock) as mock_drives,
         ):
@@ -571,6 +578,181 @@ class TestDrivesMultiAgent:
         dispatched_ids = {d.agent for d in drive_dispatches}
         assert dispatched_ids == set(FIVE_AGENT_IDS)
         assert mock_drives.call_count == 5
+
+
+class TestDrivesStaggerMultiAgent:
+    """Regression: drive consultations must reach ALL agents, not just index 0.
+
+    Original bug (pre-fix): ``_is_time_match`` was a 1-minute window, dispatch
+    was a sequential await loop, and the cron tick only fires once per minute.
+    Whichever agents' LLM consultations finished fast enough during the ~10-15
+    min the originating tick stayed alive got a drive; the rest were silently
+    skipped until the next scheduled drive time. Coverage decayed by agent
+    index — Strategist (index 4) hit 12.5% over 8 windows.
+
+    Fix: per-agent stagger, mirroring dreams. Each agent fires at
+    ``base_time + idx * stagger_minutes`` and each tick handles at most one
+    agent per scheduled drive time, so the bug class disappears structurally.
+    """
+
+    @pytest.mark.asyncio
+    async def test_each_agent_dispatched_at_staggered_minute(self, tmp_path):
+        """5 agents with 10-min stagger: agent N fires at 17:00 + N*10."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_weekend_times=["13:00"],
+            schedule_drives_stagger_minutes=10,
+        )
+
+        dispatched_agents: dict[str, int] = {}
+
+        # Tuesday Apr 14 2026 — weekday
+        for minute in range(0, 50, 10):  # 17:00, 17:10, 17:20, 17:30, 17:40
+            fake_now = datetime(2026, 4, 14, 17, minute, tzinfo=cfg.tz)
+
+            with (
+                patch("agent_os.scheduler._now", return_value=fake_now),
+                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.scheduler._is_weekend", return_value=False),
+                patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
+            ):
+                result = await tick(config=cfg)
+
+            for d in result.dispatched:
+                if d.type == "drives":
+                    dispatched_agents[d.agent] = minute
+
+        assert len(dispatched_agents) == 5, f"Only {len(dispatched_agents)}/5 agents dispatched: {dispatched_agents}"
+        assert dispatched_agents["agent-000-steward"] == 0
+        assert dispatched_agents["agent-001-maker"] == 10
+        assert dispatched_agents["agent-003-operator"] == 20
+        assert dispatched_agents["agent-005-grower"] == 30
+        assert dispatched_agents["agent-006-strategist"] == 40
+
+    @pytest.mark.asyncio
+    async def test_only_one_agent_per_stagger_slot(self, tmp_path):
+        """At 17:10, exactly one agent (index 1) should dispatch, not others."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_stagger_minutes=10,
+        )
+
+        fake_now = datetime(2026, 4, 14, 17, 10, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.scheduler._is_weekend", return_value=False),
+            patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock) as mock_drives,
+        ):
+            result = await tick(config=cfg)
+
+        drive_dispatches = [d for d in result.dispatched if d.type == "drives"]
+        assert len(drive_dispatches) == 1
+        assert drive_dispatches[0].agent == "agent-001-maker"
+        mock_drives.assert_called_once_with("agent-001-maker", config=cfg)
+
+    @pytest.mark.asyncio
+    async def test_non_drive_minutes_dispatch_nothing(self, tmp_path):
+        """At 17:05 (between stagger slots), no agent should be dispatched."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_stagger_minutes=10,
+        )
+
+        fake_now = datetime(2026, 4, 14, 17, 5, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.scheduler._is_weekend", return_value=False),
+            patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock) as mock_drives,
+        ):
+            result = await tick(config=cfg)
+
+        drive_dispatches = [d for d in result.dispatched if d.type == "drives"]
+        assert len(drive_dispatches) == 0
+        mock_drives.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stagger_applies_per_drive_time(self, tmp_path):
+        """Multiple drive times each get their own staggered fan-out."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["09:00", "17:00"],
+            schedule_drives_stagger_minutes=10,
+        )
+
+        # Agent 1 should fire at both 09:10 (idx 1 of 09:00 window) and
+        # 17:10 (idx 1 of 17:00 window).
+        hits = []
+        for hour in (9, 17):
+            fake_now = datetime(2026, 4, 14, hour, 10, tzinfo=cfg.tz)
+            with (
+                patch("agent_os.scheduler._now", return_value=fake_now),
+                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.scheduler._is_weekend", return_value=False),
+                patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
+            ):
+                result = await tick(config=cfg)
+            for d in result.dispatched:
+                if d.type == "drives":
+                    hits.append((hour, d.agent))
+
+        assert hits == [(9, "agent-001-maker"), (17, "agent-001-maker")]
+
+    @pytest.mark.asyncio
+    async def test_stagger_wraps_past_hour_boundary(self, tmp_path):
+        """Stagger from 17:55 with 10-min offsets should wrap into 18:xx."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:55"],
+            schedule_drives_stagger_minutes=10,
+        )
+
+        expected = [
+            (17, 55, "agent-000-steward"),
+            (18, 5, "agent-001-maker"),
+            (18, 15, "agent-003-operator"),
+            (18, 25, "agent-005-grower"),
+            (18, 35, "agent-006-strategist"),
+        ]
+
+        dispatched_agents: dict[str, tuple[int, int]] = {}
+        for hour, minute, _agent_id in expected:
+            fake_now = datetime(2026, 4, 14, hour, minute, tzinfo=cfg.tz)
+            with (
+                patch("agent_os.scheduler._now", return_value=fake_now),
+                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.scheduler._is_weekend", return_value=False),
+                patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
+            ):
+                result = await tick(config=cfg)
+            for d in result.dispatched:
+                if d.type == "drives":
+                    dispatched_agents[d.agent] = (hour, minute)
+
+        assert len(dispatched_agents) == 5
+        for hour, minute, agent_id in expected:
+            assert dispatched_agents[agent_id] == (hour, minute)
 
 
 class TestWeeklySimulation:
@@ -595,6 +777,7 @@ class TestWeeklySimulation:
             schedule_drives_enabled=True,
             schedule_drives_weekday_times=["17:00"],
             schedule_drives_weekend_times=["13:00"],
+            schedule_drives_stagger_minutes=10,
         )
 
         # Counters per agent per type
@@ -640,26 +823,22 @@ class TestWeeklySimulation:
                 if d.type == "standing_orders":
                     so_count[d.agent] += 1
 
-            # --- Drive consultation ---
+            # --- Drive consultation window (staggered, mirrors dream window) ---
             drive_hour = 13 if is_weekend else 17
-            drive_time_str = f"{drive_hour:02d}:00"
-            tick_time = day_start.replace(hour=drive_hour, minute=0)
-            with (
-                patch("agent_os.scheduler._now", return_value=tick_time),
-                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
-                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
-                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
-                patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
-                patch(
-                    "agent_os.scheduler._is_time_match",
-                    side_effect=lambda t, _dts=drive_time_str, **kw: t == _dts,
-                ),
-                patch("agent_os.scheduler._is_weekend", return_value=is_weekend),
-            ):
-                result = await tick(config=cfg)
-            for d in result.dispatched:
-                if d.type == "drives":
-                    drive_count[d.agent] += 1
+            for minute_offset in range(0, 50, 10):  # base + idx*10 for 5 agents
+                tick_time = day_start.replace(hour=drive_hour, minute=minute_offset)
+                with (
+                    patch("agent_os.scheduler._now", return_value=tick_time),
+                    patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                    patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                    patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                    patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
+                    patch("agent_os.scheduler._is_weekend", return_value=is_weekend),
+                ):
+                    result = await tick(config=cfg)
+                for d in result.dispatched:
+                    if d.type == "drives":
+                        drive_count[d.agent] += 1
 
         # --- Assertions: every agent gets every type every day ---
         for agent_id in FIVE_AGENT_IDS:
@@ -708,3 +887,185 @@ class TestDreamDispatchErrorEvents:
         assert len(dream_dispatches) == 1
         assert "error" in dream_dispatches[0].result
         assert "SDK crash" in dream_dispatches[0].result
+
+
+def _read_dispatch_outcomes(cfg: Config, agent_id: str) -> list[dict]:
+    """Read dispatch_outcome lines from an agent's per-day log."""
+    log_dir = cfg.logs_dir / agent_id
+    if not log_dir.exists():
+        return []
+    outcomes = []
+    for log_file in sorted(log_dir.glob("*.jsonl")):
+        for line in log_file.read_text().splitlines():
+            entry = json.loads(line)
+            if entry.get("action") == "dispatch_outcome":
+                outcomes.append(entry)
+    return outcomes
+
+
+class TestDispatchOutcomeJournal:
+    """Every dispatch attempt must leave a primary-source record in the
+    agent's own log (``logs/<agent-id>/<date>.jsonl``).
+
+    This is the "cycle outcome events" observability layer: silent skips,
+    locked dispatches, and errors all produce structured entries agents can
+    read directly. Without this, missed dispatches were invisible by absence
+    — the same gap that hid the drive-stagger bug for weeks.
+    """
+
+    @pytest.mark.asyncio
+    async def test_drive_success_writes_outcome(self, tmp_path):
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_stagger_minutes=0,
+        )
+        fake_now = datetime(2026, 4, 14, 17, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=[_FakeAgent("agent-001-maker")]),
+            patch("agent_os.scheduler._is_weekend", return_value=False),
+            patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
+        ):
+            await tick(config=cfg)
+
+        outcomes = _read_dispatch_outcomes(cfg, "agent-001-maker")
+        assert len(outcomes) == 1
+        assert outcomes[0]["refs"]["type"] == "drives"
+        assert outcomes[0]["refs"]["outcome"] == "success"
+        assert outcomes[0]["level"] == "info"
+
+    @pytest.mark.asyncio
+    async def test_drive_error_writes_error_outcome(self, tmp_path):
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_stagger_minutes=0,
+        )
+        fake_now = datetime(2026, 4, 14, 17, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=[_FakeAgent("agent-001-maker")]),
+            patch("agent_os.scheduler._is_weekend", return_value=False),
+            patch(
+                "agent_os.runner.run_drive_consultation",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("LLM down"),
+            ),
+        ):
+            await tick(config=cfg)
+
+        outcomes = _read_dispatch_outcomes(cfg, "agent-001-maker")
+        assert len(outcomes) == 1
+        assert outcomes[0]["refs"]["outcome"] == "error"
+        assert outcomes[0]["refs"]["error"] == "LLM down"
+        assert outcomes[0]["level"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_drive_locked_writes_locked_outcome(self, tmp_path):
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_stagger_minutes=0,
+        )
+        fake_now = datetime(2026, 4, 14, 17, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=[_FakeAgent("agent-001-maker")]),
+            patch("agent_os.scheduler._is_weekend", return_value=False),
+            patch("agent_os.scheduler.acquire_lock", return_value=None),
+            patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock) as mock_drives,
+        ):
+            await tick(config=cfg)
+
+        outcomes = _read_dispatch_outcomes(cfg, "agent-001-maker")
+        assert len(outcomes) == 1
+        assert outcomes[0]["refs"]["outcome"] == "locked"
+        assert outcomes[0]["refs"]["type"] == "drives"
+        mock_drives.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dream_success_writes_outcome(self, tmp_path):
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_dreams_enabled=True,
+            schedule_dreams_time="02:00",
+            schedule_dreams_stagger_minutes=0,
+        )
+        fake_now = datetime(2026, 4, 14, 2, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=[_FakeAgent("agent-001-maker")]),
+            patch("agent_os.runner.run_dream_cycle", new_callable=AsyncMock),
+        ):
+            await tick(config=cfg)
+
+        outcomes = _read_dispatch_outcomes(cfg, "agent-001-maker")
+        types = [o["refs"]["type"] for o in outcomes]
+        outcome_kinds = [o["refs"]["outcome"] for o in outcomes]
+        assert "dreams" in types
+        assert all(k == "success" for k in outcome_kinds)
+
+    @pytest.mark.asyncio
+    async def test_cycle_success_writes_outcome(self, tmp_path):
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_cycles_enabled=True,
+            schedule_cycles_interval_minutes=15,
+        )
+        fake_now = datetime(2026, 4, 14, 12, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=[_FakeAgent("agent-001-maker")]),
+            patch("agent_os.runner.run_cycle", new_callable=AsyncMock),
+        ):
+            await tick(config=cfg)
+
+        outcomes = _read_dispatch_outcomes(cfg, "agent-001-maker")
+        cycle_outcomes = [o for o in outcomes if o["refs"]["type"] == "cycle"]
+        assert len(cycle_outcomes) == 1
+        assert cycle_outcomes[0]["refs"]["outcome"] == "success"
+        assert "duration_sec" in cycle_outcomes[0]["refs"]
+
+    @pytest.mark.asyncio
+    async def test_outcome_includes_duration(self, tmp_path):
+        """Successful dispatches record duration_sec for downstream analysis."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_drives_enabled=True,
+            schedule_drives_weekday_times=["17:00"],
+            schedule_drives_stagger_minutes=0,
+        )
+        fake_now = datetime(2026, 4, 14, 17, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=[_FakeAgent("agent-001-maker")]),
+            patch("agent_os.scheduler._is_weekend", return_value=False),
+            patch("agent_os.runner.run_drive_consultation", new_callable=AsyncMock),
+        ):
+            await tick(config=cfg)
+
+        outcomes = _read_dispatch_outcomes(cfg, "agent-001-maker")
+        assert len(outcomes) == 1
+        assert "duration_sec" in outcomes[0]["refs"]
+        assert isinstance(outcomes[0]["refs"]["duration_sec"], (int, float))
