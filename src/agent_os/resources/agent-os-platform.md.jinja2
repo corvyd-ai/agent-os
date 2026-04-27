@@ -156,6 +156,7 @@ agent-os includes a built-in observability layer. You don't operate it, but you 
 
 - **Pre-flight gate** — before each cycle, agent-os verifies you can write to your directories. If you can't (bad permissions), the cycle is blocked with a notification — no silent failure loops.
 - **Failure circuit breaker** — after N consecutive task failures (default 5), agent-os stops dispatching you and notifies the human. Auto-resets after a cooldown if the underlying issue resolves.
+- **Dispatch outcome events** — every scheduled dispatch attempt against you (cycle, standing-orders, drive, dream) appends a `dispatch_outcome` line to your daily log at `agents/logs/<your-id>/<date>.jsonl`. Each line records `type`, `outcome` (one of `success` / `error` / `locked`), `duration_sec`, and `error` if applicable. This is your **primary source** for "did I actually get a drive consultation today?" — don't reason from "it should have run" or "I had one recently"; grep your log. If a scheduled dispatch never fires, no `dispatch_outcome` line appears for it — silent absence is itself signal.
 - **Notifications** — file-drop to `operations/notifications/`, plus optional desktop/webhook/script delivery.
 - **Daily digest** — morning summary at `operations/digests/YYYY-MM-DD.md`.
 - **`agent-os doctor`** — humans run this to diagnose platform/config issues.
@@ -172,6 +173,22 @@ Agents run on cadence. The two supported schedulers:
 - **systemd timers** — for service-account deployments. Same `agent-os tick` entry point, just a different trigger.
 
 You don't interact with the scheduler directly. It invokes you; you check for work; you exit.
+
+### Per-agent stagger for drives and dreams
+
+Drives and dreams use **per-agent stagger** so a single tick never has to dispatch to N agents in series. Each agent fires at `base_time + idx * stagger_minutes`, where `idx` is the agent's position in the registry list. With 5 agents and the default `stagger_minutes = 10`:
+
+| Agent index | Drive (base 17:00) | Dream (base 02:00) |
+|------------:|:-------------------|:--------------------|
+| 0 | 17:00 | 02:00 |
+| 1 | 17:10 | 02:10 |
+| 2 | 17:20 | 02:20 |
+| 3 | 17:30 | 02:30 |
+| 4 | 17:40 | 02:40 |
+
+This is why your drive may not run at the literal `weekday_times` in `agent-os.toml` — the configured time is the **base**, not your slot. The configured `stagger_minutes` keys are `[schedule.drives].stagger_minutes` and `[schedule.dreams].stagger_minutes`. Setting either to `0` reproduces the legacy "fan out at one tick" behavior (every agent fires at the base time) — fine for tiny deployments but reintroduces the bug class where a single tick has to await every agent serially.
+
+Standing orders and cycles are interval-based (minutes since last run), not time-of-day, so they don't use stagger.
 
 ---
 
@@ -252,6 +269,13 @@ weekly_cap = 500.00
 enabled = true
 [schedule.cycles]
 interval_minutes = 15
+[schedule.drives]
+weekday_times = ["17:00"]
+weekend_times = ["13:00"]
+stagger_minutes = 10             # idx*N offset per agent; 0 = legacy fan-out
+[schedule.dreams]
+time = "02:00"
+stagger_minutes = 10
 
 [notifications]
 enabled = true
