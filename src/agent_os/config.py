@@ -668,10 +668,27 @@ _config: Config | None = None
 
 
 def get_config() -> Config:
-    """Return the global Config singleton, creating it on first access."""
+    """Return the global Config singleton, creating it on first access.
+
+    On first creation, attempts to discover and load an ``agent-os.toml``
+    using the same rules as the CLI (``AGENT_OS_CONFIG`` env var, then
+    walking up from cwd). If found, the Config is built from the TOML so
+    programmatic callers see the same ``company_root`` and other settings
+    the CLI does — without that, a caller running from any cwd would land
+    a default Config with ``company_root="."`` and quietly write to the
+    wrong tree.
+
+    Falls back to a default ``Config()`` when no TOML is discovered. To
+    bypass discovery entirely (e.g. in tests), call ``configure(Config())``
+    before the first ``get_config()`` call.
+    """
     global _config
     if _config is None:
-        _config = Config()
+        toml_path = Config.discover_toml()
+        if toml_path is not None:
+            _config = Config.from_toml(toml_path)
+        else:
+            _config = Config()
     return _config
 
 
