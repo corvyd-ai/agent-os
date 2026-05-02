@@ -504,15 +504,23 @@ def _find_repo_root() -> Path:
 
 
 def cmd_update(args):
-    """Self-update agent-os from its git repository."""
-    import subprocess
+    """Self-update agent-os.
 
+    Dispatches on installation mode: a git checkout (editable install)
+    pulls and reinstalls; a wheel install fetches the latest GitHub
+    release and reinstalls. Both end by firing release notes so agents
+    running on this deployment learn what changed.
+    """
     repo_root = _find_repo_root()
-    if repo_root is None:
-        print("Error: agent-os is not installed from a git repository.", file=sys.stderr)
-        print("Install from git to use self-update:", file=sys.stderr)
-        print("  git clone https://github.com/corvyd-ai/agent-os && cd agent-os && pip install -e .", file=sys.stderr)
-        sys.exit(1)
+    if repo_root is not None:
+        _update_from_git(args, repo_root)
+    else:
+        _update_from_wheel(args)
+
+
+def _update_from_git(args, repo_root: Path) -> None:
+    """Self-update from a local git checkout (editable install)."""
+    import subprocess
 
     def git(*cmd):
         result = subprocess.run(
@@ -620,6 +628,228 @@ def cmd_update(args):
         previous_version=previous_version,
         new_version=new_version,
     )
+
+
+def _update_from_wheel(args) -> None:
+    """Self-update from a published GitHub Release wheel.
+
+    Used when agent-os is installed from a built wheel (the production
+    deployment path) and there's no local git checkout to pull from.
+    Resolves the release source from --source > [update].source >
+    upstream default, fetches the release JSON via the public GitHub
+    API (no auth needed for public repos), downloads the .whl asset,
+    and `pip install --upgrade`s it. Then fires release notes.
+
+    Errors are surfaced — a network failure or missing asset must NOT
+    silently no-op, since the whole point of this path is to keep
+    production deployments current.
+    """
+    import json
+    import subprocess
+    import tempfile
+    import urllib.error
+    import urllib.request
+
+    from . import __version__ as previous_version
+
+    source = _resolve_update_source(args)
+    owner_repo, _, tag = source.partition("@")
+    if not owner_repo:
+        print(f"Error: invalid update source '{source}'. Expected 'owner/repo@tag'.", file=sys.stderr)
+        sys.exit(1)
+    tag = tag or "latest"
+
+    api_url = f"https://api.github.com/repos/{owner_repo}/releases/tags/{tag}"
+    print(f"Fetching {owner_repo}@{tag} release info...")
+
+    try:
+        req = urllib.request.Request(
+            api_url,
+            headers={
+                "User-Agent": "agent-os-update",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        print(f"Error: GitHub API returned {e.code} {e.reason} for {api_url}", file=sys.stderr)
+        sys.exit(1)
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        print(f"Error: could not fetch release info from {api_url}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    wheel_assets = [a for a in data.get("assets", []) if a.get("name", "").endswith(".whl")]
+    if not wheel_assets:
+        print(f"Error: release {owner_repo}@{tag} has no .whl asset to install.", file=sys.stderr)
+        sys.exit(1)
+
+    asset = wheel_assets[0]
+    wheel_url = asset["browser_download_url"]
+    wheel_name = asset["name"]
+    new_version_from_wheel = _parse_wheel_version(wheel_name)
+
+    if new_version_from_wheel and new_version_from_wheel == previous_version:
+        print(f"Already up to date (v{previous_version}).")
+        return
+
+    print()
+    print(f"Current: v{previous_version}")
+    print(f"Latest:  v{new_version_from_wheel or '?'}  ({wheel_name})")
+    body = (data.get("body") or "").strip()
+    if body:
+        print()
+        print("Release notes from GitHub:")
+        print("─" * 40)
+        print(body)
+        print("─" * 40)
+    print()
+
+    if not getattr(args, "yes", False):
+        try:
+            answer = input("Apply update? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+        if answer and answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    # Download wheel to a temp file, install, then clean up
+    print(f"\nDownloading {wheel_name}...")
+    with tempfile.NamedTemporaryFile(suffix=".whl", delete=False) as tmp:
+        wheel_path = Path(tmp.name)
+    try:
+        try:
+            req = urllib.request.Request(wheel_url, headers={"User-Agent": "agent-os-update"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                wheel_path.write_bytes(resp.read())
+        except (urllib.error.URLError, OSError) as e:
+            print(f"Error: download failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Installing {wheel_name}...")
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--force-reinstall",
+                "--no-deps",
+                str(wheel_path),
+                "--quiet",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            print(f"Error: pip install failed: {r.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+    finally:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            wheel_path.unlink()
+
+    # Re-read installed version from a subprocess so we see the new code
+    r = subprocess.run(
+        [sys.executable, "-c", "from agent_os import __version__; print(__version__)"],
+        capture_output=True,
+        text=True,
+    )
+    new_version = r.stdout.strip() if r.returncode == 0 else (new_version_from_wheel or "unknown")
+    print(f"\nUpdated to v{new_version}.")
+
+    # Translate the GitHub release body into "commit_subjects" the release-notes
+    # mechanism can render. Markdown bullet lines become individual subjects;
+    # otherwise the body becomes a single-blob entry. This means the agent-visible
+    # broadcast/changelog mirrors what humans see on the release page.
+    commit_subjects = _extract_subjects_from_release_body(body)
+    new_commit = _extract_commit_sha_from_release_body(body)
+
+    _write_release_notes_if_possible(
+        previous_commit="",
+        new_commit=new_commit,
+        commit_subjects=commit_subjects,
+        previous_version=previous_version,
+        new_version=new_version,
+    )
+
+
+def _resolve_update_source(args) -> str:
+    """Resolve the update source spec ('owner/repo@tag').
+
+    Resolution order: --source flag > [update].source in agent-os.toml >
+    Config default ('corvyd-ai/agent-os@latest').
+
+    `agent-os update` does not run `_set_root()` (it operates on the
+    platform package, not a company tree), so we discover and load the
+    TOML directly here for the [update].source lookup.
+    """
+    cli_source = getattr(args, "source", None)
+    if cli_source:
+        return cli_source
+
+    try:
+        from .config import Config
+
+        toml_path = Config.discover_toml()
+        if toml_path is not None:
+            cfg = Config.from_toml(toml_path)
+            return cfg.update_source
+    except (OSError, ValueError):
+        pass
+
+    from .config import Config
+
+    return Config().update_source
+
+
+def _parse_wheel_version(wheel_name: str) -> str:
+    """Extract the version segment from a wheel filename per PEP 491.
+
+    `agent_os-0.3.0-py3-none-any.whl` → `0.3.0`
+    `agent_os-0.3.0.dev5+g1234567-py3-none-any.whl` → `0.3.0.dev5+g1234567`
+    Returns '' if the filename doesn't have at least two `-`-separated parts.
+    """
+    parts = wheel_name.split("-")
+    if len(parts) >= 2:
+        return parts[1]
+    return ""
+
+
+def _extract_subjects_from_release_body(body: str) -> list[str]:
+    """Pull bullet items out of a GitHub release body for the release-notes broadcast.
+
+    If the body has markdown bullet lines, those become individual entries
+    (the broadcast/changelog renders them as a list). Otherwise the body
+    falls through as a single entry — better than nothing, since wheel
+    updates can't read per-commit subjects from local git.
+    """
+    if not body:
+        return []
+    bullets = [line.lstrip("-* \t").rstrip() for line in body.splitlines() if line.lstrip().startswith(("-", "*"))]
+    bullets = [b for b in bullets if b]
+    if bullets:
+        return bullets
+    first_line = body.splitlines()[0].strip()
+    return [first_line] if first_line else []
+
+
+def _extract_commit_sha_from_release_body(body: str) -> str:
+    """Pull a 'Commit: <sha>' line out of a GitHub release body, if present.
+
+    CI publishes the source commit in each release body as
+    `Commit: <full-sha>`. Returns '' if not found.
+    """
+    import re
+
+    if not body:
+        return ""
+    m = re.search(r"\bCommit:\s*([0-9a-f]{7,40})\b", body)
+    return m.group(1) if m else ""
 
 
 def _write_release_notes_if_possible(
@@ -1977,8 +2207,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_project.set_defaults(func=cmd_project)
 
     # update
-    p_update = subparsers.add_parser("update", help="Self-update agent-os from git")
+    p_update = subparsers.add_parser(
+        "update",
+        help="Self-update agent-os (git checkout: pull+reinstall; wheel install: fetch latest GitHub release)",
+    )
     p_update.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    p_update.add_argument(
+        "--source",
+        default=None,
+        help=(
+            "GitHub release source for wheel installs, format 'owner/repo@tag'. "
+            "Overrides [update].source in agent-os.toml. "
+            "Default: corvyd-ai/agent-os@latest. Ignored for git-checkout installs."
+        ),
+    )
     p_update.set_defaults(func=cmd_update)
 
     # cron

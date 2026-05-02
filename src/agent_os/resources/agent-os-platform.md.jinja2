@@ -217,7 +217,7 @@ Standing orders and cycles are interval-based (minutes since last run), not time
 | `agent-os manifest` | Regenerate knowledge manifest |
 | `agent-os watchdog` | Check agent liveness |
 | `agent-os cron {install,uninstall,status}` | Manage cron entry |
-| `agent-os update` | Self-update from git (regenerates this doc) |
+| `agent-os update` | Self-update from git checkout OR latest GitHub release wheel; regenerates this doc and posts a broadcast on version change |
 
 ---
 
@@ -293,6 +293,15 @@ cooldown_minutes = 60
 ## Versioning
 
 agent-os is versioned via git tags (`hatch-vcs`). Your current version is **v{{ version }}**. The changelog of platform updates is at `knowledge/technical/platform-changelog.md` — read it if you want to know what's changed since you last checked.
+
+### How updates reach this deployment
+
+`agent-os update` self-updates regardless of how the platform was installed:
+
+- **Git-checkout install** (`pip install -e .` from a clone): pulls `origin/<branch>`, `pip install -e .` reinstalls in place. Per-commit subjects from the local git log become the release-notes broadcast/changelog entries.
+- **Wheel install** (production): fetches the latest GitHub Release (default `corvyd-ai/agent-os@latest` — every merge to `main` republishes this release with a new wheel via CI), downloads the `.whl` asset, `pip install --upgrade --force-reinstall --no-deps`. The release body's bullet lines become the broadcast/changelog entries; the `Commit: <sha>` footer is captured for traceability. Override the release source via `--source owner/repo@tag` or `[update].source` in `agent-os.toml`.
+
+Either path ends by writing release notes to `knowledge/technical/` so you, the agent, learn what's new — without that, you'd be running new code with old mental models. If a deployment uses neither path (e.g. a direct `pip install --force-reinstall <wheel-url>` script), the release-notes mechanism never fires; the operator should switch to `agent-os update` to keep agents in sync with platform changes.
 
 ---
 

@@ -160,6 +160,14 @@ class Config:
     # invoking shell doesn't have them loaded. Empty = only check os.environ.
     runtime_env_file: str = ""
 
+    # --- Self-update ---
+    # GitHub release source for `agent-os update` when the platform is
+    # installed from a wheel (no local git checkout). Format: "owner/repo@tag".
+    # The default points at the upstream `latest` release CI publishes on
+    # every merge to main. Forks/private rebuilds set this to their own
+    # repo+tag pair; CLI `--source` overrides at invocation time.
+    update_source: str = "corvyd-ai/agent-os@latest"
+
     # --- Project (SDLC) ---
     project_repo_path: str = "."  # relative to company_root, or absolute
     project_default_branch: str = "main"
@@ -397,6 +405,11 @@ class Config:
             kwargs["runtime_user"] = runtime["user"]
         if "env_file" in runtime:
             kwargs["runtime_env_file"] = runtime["env_file"]
+
+        # [update]
+        update = data.get("update", {})
+        if "source" in update:
+            kwargs["update_source"] = str(update["source"])
 
         # [roles]
         roles = data.get("roles", {})
