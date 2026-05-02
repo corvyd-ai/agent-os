@@ -4,7 +4,6 @@ import json
 import subprocess
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -113,21 +112,24 @@ def test_find_repo_root_returns_path():
     assert (root / "pyproject.toml").exists()
 
 
-def test_find_repo_root_returns_none_outside_git(tmp_path, monkeypatch):
-    """_find_repo_root returns None when the package isn't in a git repo."""
-    with patch("agent_os.cli.Path") as mock_path:
-        # Make __file__ resolve to a path outside any git repo
-        fake_file = tmp_path / "src" / "agent_os" / "cli.py"
-        fake_file.parent.mkdir(parents=True)
-        fake_file.touch()
-        mock_path.__file__ = str(fake_file)
-        # Actually call the real function but with a patched starting point
-        # Simpler: just verify the function handles None gracefully
-    # Test via cmd_update instead
-    with patch("agent_os.cli._find_repo_root", return_value=None):
-        with pytest.raises(SystemExit) as exc_info:
-            cmd_update(SimpleNamespace(yes=False))
-        assert exc_info.value.code == 1
+def test_update_dispatches_to_wheel_when_no_git_repo(monkeypatch):
+    """When _find_repo_root returns None (wheel install), cmd_update must
+    take the wheel path — not error out as it did before."""
+    called = {}
+
+    def fake_wheel(args):
+        called["wheel"] = True
+
+    def fake_git(args, repo_root):  # pragma: no cover — should not be called
+        called["git"] = True
+
+    monkeypatch.setattr("agent_os.cli._find_repo_root", lambda: None)
+    monkeypatch.setattr("agent_os.cli._update_from_wheel", fake_wheel)
+    monkeypatch.setattr("agent_os.cli._update_from_git", fake_git)
+
+    cmd_update(SimpleNamespace(yes=False, source=None))
+
+    assert called == {"wheel": True}
 
 
 def test_update_already_up_to_date(monkeypatch):
@@ -213,6 +215,239 @@ def test_update_pulls_and_reinstalls(monkeypatch):
     # Should have run pip install
     pip_calls = [c for c in calls if c[0] != "git"]
     assert any("-m" in c and "pip" in c for c in pip_calls)
+
+
+# ── update command (wheel-install path) ────────────────────────────
+
+
+class _FakeURLResponse:
+    """Minimal context-manager stand-in for urllib.request.urlopen()."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _make_release_payload(*, version: str, body: str = "") -> bytes:
+    """Build the JSON shape GitHub returns for a release."""
+    payload = {
+        "tag_name": "latest",
+        "body": body,
+        "assets": [
+            {
+                "name": f"agent_os-{version}-py3-none-any.whl",
+                "browser_download_url": f"https://example.test/agent_os-{version}-py3-none-any.whl",
+            }
+        ],
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def test_update_from_wheel_skips_when_versions_match(monkeypatch, capsys):
+    """If the published wheel version matches the installed version,
+    cmd_update must short-circuit — no pip install, no release notes."""
+    from agent_os import cli
+
+    monkeypatch.setattr(cli, "_find_repo_root", lambda: None)
+    monkeypatch.setattr("agent_os.__version__", "9.9.9")
+
+    def fake_urlopen(req, timeout=None):
+        # Echo the same version we say is installed
+        return _FakeURLResponse(_make_release_payload(version="9.9.9"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    pip_calls = []
+
+    def fake_run(cmd, **kwargs):
+        pip_calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    cmd_update(SimpleNamespace(yes=True, source=None))
+
+    assert pip_calls == []  # never installed
+    out = capsys.readouterr().out
+    assert "Already up to date" in out
+
+
+def test_update_from_wheel_installs_and_writes_release_notes(monkeypatch, tmp_path):
+    """When a newer wheel is published, cmd_update downloads, installs,
+    and fires release notes."""
+    from agent_os import cli
+
+    monkeypatch.setattr(cli, "_find_repo_root", lambda: None)
+    monkeypatch.setattr("agent_os.__version__", "0.2.0")
+
+    api_url_seen = []
+    download_url_seen = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        if url.endswith(".whl"):
+            download_url_seen.append(url)
+            return _FakeURLResponse(b"FAKE-WHEEL-BYTES")
+        api_url_seen.append(url)
+        return _FakeURLResponse(
+            _make_release_payload(
+                version="0.3.0",
+                body="- feat: add observability\n- fix: respect runtime user\n\nCommit: abcdef1234567",
+            )
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    pip_invocations = []
+    notes_invocations = []
+
+    def fake_run(cmd, **kwargs):
+        if "pip" in cmd:
+            pip_invocations.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        # version re-read subprocess
+        return SimpleNamespace(returncode=0, stdout="0.3.0\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def fake_write_notes(**kwargs):
+        notes_invocations.append(kwargs)
+
+    monkeypatch.setattr(cli, "_write_release_notes_if_possible", fake_write_notes)
+
+    cmd_update(SimpleNamespace(yes=True, source=None))
+
+    # Hit the API for release info, then downloaded the wheel
+    assert any("api.github.com/repos/" in u for u in api_url_seen)
+    assert any(u.endswith(".whl") for u in download_url_seen)
+    # pip install was invoked
+    assert any("install" in c for c in pip_invocations)
+    # Release notes fired with the expected payload
+    assert len(notes_invocations) == 1
+    notes = notes_invocations[0]
+    assert notes["previous_version"] == "0.2.0"
+    assert notes["new_version"] == "0.3.0"
+    assert notes["new_commit"] == "abcdef1234567"
+    assert "feat: add observability" in notes["commit_subjects"]
+    assert "fix: respect runtime user" in notes["commit_subjects"]
+
+
+def test_update_from_wheel_respects_source_flag(monkeypatch):
+    """--source overrides both the TOML field and the upstream default."""
+    from agent_os import cli
+
+    monkeypatch.setattr(cli, "_find_repo_root", lambda: None)
+    monkeypatch.setattr("agent_os.__version__", "9.9.9")
+
+    seen_urls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        seen_urls.append(url)
+        return _FakeURLResponse(_make_release_payload(version="9.9.9"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""))
+
+    cmd_update(SimpleNamespace(yes=True, source="myorg/agent-os-fork@v1.2.3"))
+
+    assert any("myorg/agent-os-fork" in u and u.endswith("/v1.2.3") for u in seen_urls)
+
+
+def test_update_from_wheel_errors_on_network_failure(monkeypatch):
+    """A network failure on the API call must surface as SystemExit, not silent skip."""
+    import urllib.error
+
+    from agent_os import cli
+
+    monkeypatch.setattr(cli, "_find_repo_root", lambda: None)
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError("name resolution failed")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_update(SimpleNamespace(yes=True, source=None))
+    assert exc_info.value.code == 1
+
+
+def test_update_from_wheel_errors_when_no_wheel_asset(monkeypatch):
+    """A release with no .whl asset must error rather than no-op."""
+    from agent_os import cli
+
+    monkeypatch.setattr(cli, "_find_repo_root", lambda: None)
+
+    def fake_urlopen(req, timeout=None):
+        return _FakeURLResponse(json.dumps({"tag_name": "latest", "assets": []}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_update(SimpleNamespace(yes=True, source=None))
+    assert exc_info.value.code == 1
+
+
+# ── helper-function unit tests ─────────────────────────────────────
+
+
+def test_parse_wheel_version_release():
+    from agent_os.cli import _parse_wheel_version
+
+    assert _parse_wheel_version("agent_os-0.3.0-py3-none-any.whl") == "0.3.0"
+
+
+def test_parse_wheel_version_dev():
+    from agent_os.cli import _parse_wheel_version
+
+    assert _parse_wheel_version("agent_os-0.3.0.dev5+g1234567-py3-none-any.whl") == "0.3.0.dev5+g1234567"
+
+
+def test_parse_wheel_version_malformed():
+    from agent_os.cli import _parse_wheel_version
+
+    assert _parse_wheel_version("nope.whl") == ""
+
+
+def test_extract_subjects_from_bullets():
+    from agent_os.cli import _extract_subjects_from_release_body
+
+    body = "- feat: a\n- fix: b\n* doc: c\n\nSome trailing prose."
+    assert _extract_subjects_from_release_body(body) == ["feat: a", "fix: b", "doc: c"]
+
+
+def test_extract_subjects_from_prose_only():
+    from agent_os.cli import _extract_subjects_from_release_body
+
+    body = "First line is the summary.\nSecond line.\n"
+    assert _extract_subjects_from_release_body(body) == ["First line is the summary."]
+
+
+def test_extract_subjects_from_empty_body():
+    from agent_os.cli import _extract_subjects_from_release_body
+
+    assert _extract_subjects_from_release_body("") == []
+
+
+def test_extract_commit_sha_present():
+    from agent_os.cli import _extract_commit_sha_from_release_body
+
+    body = "Auto-published by CI on merge to main. Commit: abcdef0123456789\n"
+    assert _extract_commit_sha_from_release_body(body) == "abcdef0123456789"
+
+
+def test_extract_commit_sha_absent():
+    from agent_os.cli import _extract_commit_sha_from_release_body
+
+    assert _extract_commit_sha_from_release_body("no sha here") == ""
 
 
 # ── budget command config visibility (bug 3) ────────────────────────
