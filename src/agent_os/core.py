@@ -1181,6 +1181,43 @@ def list_backlog(*, config: Config | None = None) -> list[tuple[dict, str, Path]
     return results
 
 
+# --- Task failure awareness ---
+
+
+def get_recent_failures(
+    agent_id: str | None = None,
+    *,
+    max_age_hours: int = 72,
+    config: Config | None = None,
+) -> list[tuple[dict, str, Path]]:
+    """Read recent failed tasks, optionally filtered by assigned agent.
+
+    When *agent_id* is ``None``, returns all failed tasks (governance view).
+    When given, returns only tasks assigned to that agent.
+
+    Returns list of ``(metadata, body, path)`` tuples, sorted newest first
+    (by file modification time).  Tasks older than *max_age_hours* are excluded.
+    """
+    cfg = config or get_config()
+    if not cfg.tasks_failed.exists():
+        return []
+
+    import time
+
+    cutoff = time.time() - (max_age_hours * 3600)
+
+    results = []
+    for f in sorted(cfg.tasks_failed.glob("*.md"), reverse=True):
+        if f.stat().st_mtime < cutoff:
+            continue
+        meta, body = _parse_frontmatter(f)
+        if agent_id is not None and meta.get("assigned_to") != agent_id:
+            continue
+        results.append((meta, body, f))
+
+    return results
+
+
 # --- Feedback / system notes ---
 
 
