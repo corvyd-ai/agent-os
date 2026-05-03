@@ -419,6 +419,14 @@ def cmd_schedule(args):
     print(get_schedule_status())
 
 
+def cmd_dispatch_status(args):
+    """Show per-agent dispatch status — one-glance view of scheduler activity."""
+    _set_root(args)
+    from .events import format_dispatch_status
+
+    print(format_dispatch_status())
+
+
 # --- budget command ---
 
 
@@ -2001,6 +2009,7 @@ Common commands, grouped by intent:
     messages <ch>     Broadcasts, threads, human inbox, agent inbox
     strategy <topic>  Drives, decisions, or proposals
     timeline          Merged activity log for a day
+    dispatch-status   Per-agent dispatch state (cadence, last/next)
 
   Run an agent
     cycle <agent>             One work cycle (tasks, messages, threads)
@@ -2123,6 +2132,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sched = subparsers.add_parser("schedule", help="Show schedule status")
     _add_common_args(p_sched)
     p_sched.set_defaults(func=cmd_schedule)
+
+    # dispatch-status
+    p_ds = subparsers.add_parser("dispatch-status", help="Show per-agent dispatch status")
+    _add_config_args(p_ds)
+    p_ds.set_defaults(func=cmd_dispatch_status)
 
     # budget
     p_budget = subparsers.add_parser("budget", help="Show budget status")

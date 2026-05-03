@@ -22,6 +22,7 @@ from datetime import datetime
 
 from .budget import check_budget
 from .config import Config, get_config
+from .events import DispatchSkippedEvent, emit_dispatch_skipped
 from .logger import get_logger
 from .registry import list_agents
 
@@ -293,6 +294,11 @@ async def tick(*, config: Config | None = None) -> TickResult:
     # ~1 minute, so they never bunch up again.
     if outside_hours and "cycle" in _OPERATING_HOURS_GATED:
         result.skipped.append("cycles: outside operating hours")
+        for agent_id in cycle_agents:
+            emit_dispatch_skipped(
+                DispatchSkippedEvent(agent=agent_id, cycle_type="cycle", reason="outside_operating_hours"),
+                config=cfg,
+            )
     elif cfg.schedule_cycles_enabled:
         for agent_id in cycle_agents:
             cadence_name = "scheduler-cycle"
@@ -338,6 +344,11 @@ async def tick(*, config: Config | None = None) -> TickResult:
     # One agent per tick, same rationale as cycles above.
     if outside_hours and "standing_orders" in _OPERATING_HOURS_GATED:
         result.skipped.append("standing_orders: outside operating hours")
+        for agent_id in agent_ids:
+            emit_dispatch_skipped(
+                DispatchSkippedEvent(agent=agent_id, cycle_type="standing_orders", reason="outside_operating_hours"),
+                config=cfg,
+            )
     elif cfg.schedule_standing_orders_enabled:
         for agent_id in agent_ids:
             cadence_name = "scheduler-standing-orders"
@@ -399,6 +410,11 @@ async def tick(*, config: Config | None = None) -> TickResult:
     # disappears structurally.
     if outside_hours and "drives" in _OPERATING_HOURS_GATED:
         result.skipped.append("drives: outside operating hours")
+        for agent_id in agent_ids:
+            emit_dispatch_skipped(
+                DispatchSkippedEvent(agent=agent_id, cycle_type="drives", reason="outside_operating_hours"),
+                config=cfg,
+            )
     elif cfg.schedule_drives_enabled:
         times = cfg.schedule_drives_weekend_times if _is_weekend(config=cfg) else cfg.schedule_drives_weekday_times
         now = _now(config=cfg)
