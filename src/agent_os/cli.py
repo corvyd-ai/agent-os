@@ -983,6 +983,51 @@ def cmd_doctor(args):
     sys.exit(1 if result.errors else 0)
 
 
+# --- audit command ---
+
+
+def cmd_audit(args):
+    """Cross-reference filesystem state against primary sources."""
+    _set_root(args)
+    from .audit import format_audit_json, format_audit_report, run_audit
+    from .config import get_config
+
+    cfg = get_config()
+
+    # Determine which checks to run
+    checks = []
+    if getattr(args, "all", False):
+        checks = None  # run_audit defaults to all
+    else:
+        if getattr(args, "check_prs", False):
+            checks.append("prs")
+        if getattr(args, "check_budget", False):
+            checks.append("budget")
+        if getattr(args, "check_dispatch", False):
+            checks.append("dispatch")
+        if getattr(args, "check_freshness", False):
+            checks.append("freshness")
+        if getattr(args, "check_worktrees", False):
+            checks.append("worktrees")
+        if getattr(args, "check_stale_tasks", False):
+            checks.append("stale_tasks")
+
+    # If nothing selected, default to all
+    if not checks:
+        checks = None
+
+    stale_hours = getattr(args, "stale_hours", 6.0)
+    report = run_audit(config=cfg, checks=checks, stale_task_hours=stale_hours)
+
+    if getattr(args, "json", False):
+        print(format_audit_json(report))
+    else:
+        no_color = getattr(args, "no_color", False)
+        print(format_audit_report(report, no_color=no_color))
+
+    sys.exit(1 if report.fail_count else 0)
+
+
 # --- digest command ---
 
 
@@ -2172,6 +2217,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(p_doctor)
     p_doctor.set_defaults(func=cmd_doctor)
+
+    # audit — cross-reference filesystem state against primary sources
+    p_audit = subparsers.add_parser("audit", help="Cross-reference filesystem state against primary sources")
+    p_audit.add_argument("--check-prs", action="store_true", help="Verify done tasks have matching GitHub PRs")
+    p_audit.add_argument("--check-budget", action="store_true", help="Compare cost JSONL against scheduler state")
+    p_audit.add_argument("--check-dispatch", action="store_true", help="Show last dispatch time per agent")
+    p_audit.add_argument("--check-freshness", action="store_true", help="Check agent working-memory freshness")
+    p_audit.add_argument("--check-worktrees", action="store_true", help="Find dead worktrees with no active task")
+    p_audit.add_argument("--check-stale-tasks", action="store_true", help="Find stuck in-progress tasks")
+    p_audit.add_argument("--all", action="store_true", help="Run all checks")
+    p_audit.add_argument("--json", action="store_true", help="Output as JSON")
+    p_audit.add_argument("--no-color", action="store_true", help="Disable color output")
+    p_audit.add_argument(
+        "--stale-hours",
+        type=float,
+        default=6.0,
+        help="Hours before an in-progress task is considered stale (default: 6)",
+    )
+    _add_config_args(p_audit)
+    p_audit.set_defaults(func=cmd_audit)
 
     # digest
     p_digest = subparsers.add_parser("digest", help="Generate health digest")
