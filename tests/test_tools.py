@@ -13,7 +13,7 @@ def test_all_tool_names_have_prefix():
 
 
 def test_tool_count():
-    assert len(AIOS_TOOL_NAMES) == 7
+    assert len(AIOS_TOOL_NAMES) == 8
 
 
 def test_create_server_returns_without_error():
