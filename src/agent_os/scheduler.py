@@ -284,6 +284,13 @@ async def tick(*, config: Config | None = None) -> TickResult:
     from . import runner
 
     # --- Cycles ---
+    # One agent per tick. The original design serialized N awaits inside a
+    # single tick window; with 5 agents doing LLM-backed cycles, the
+    # systemd oneshot timeout killed the tick before later agents ran.
+    # Now we dispatch the first due agent and break. The next tick (1 min
+    # later) picks up the next due agent. Cadence timestamps naturally
+    # self-stagger: after the first round, each agent's mark is offset by
+    # ~1 minute, so they never bunch up again.
     if outside_hours and "cycle" in _OPERATING_HOURS_GATED:
         result.skipped.append("cycles: outside operating hours")
     elif cfg.schedule_cycles_enabled:
@@ -317,11 +324,18 @@ async def tick(*, config: Config | None = None) -> TickResult:
                         "dispatch_error", f"Error in cycle for {agent_id}: {e}", {"type": "cycle", "agent": agent_id}
                     )
                     _record_dispatch_outcome(agent_id, "cycle", "error", started_at=started, error=str(e), config=cfg)
+                    # Mark cadence even on failure to prevent infinite retry
+                    # loops every tick and to avoid blocking agents behind
+                    # this one.  The cycle retries after the normal cadence
+                    # interval instead of hammering every minute.
+                    _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
                 finally:
                     lock.close()
                 result.dispatched.append(record)
+                break  # One agent per tick — prevents serialized timeout kills
 
     # --- Standing orders ---
+    # One agent per tick, same rationale as cycles above.
     if outside_hours and "standing_orders" in _OPERATING_HOURS_GATED:
         result.skipped.append("standing_orders: outside operating hours")
     elif cfg.schedule_standing_orders_enabled:
@@ -373,6 +387,7 @@ async def tick(*, config: Config | None = None) -> TickResult:
                 finally:
                     lock.close()
                 result.dispatched.append(record)
+                break  # One agent per tick — prevents serialized timeout kills
 
     # --- Drive consultations ---
     # Per-agent stagger, mirroring the dream pattern. The original "fire all

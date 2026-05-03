@@ -510,11 +510,43 @@ class TestDreamStaggerMultiAgent:
 
 
 class TestStandingOrdersMultiAgent:
-    """Standing orders must dispatch to all agents, not just the first."""
+    """Standing orders must dispatch to all agents across multiple ticks.
+
+    With the one-per-tick stagger, each tick dispatches at most one agent.
+    The cadence marks naturally spread agents across consecutive minutes.
+    """
 
     @pytest.mark.asyncio
-    async def test_all_agents_receive_standing_orders(self, tmp_path):
-        """When cadence is due for all agents, all should be dispatched."""
+    async def test_all_agents_receive_standing_orders_across_ticks(self, tmp_path):
+        """All 5 agents get standing orders over 5 consecutive ticks."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_standing_orders_enabled=True,
+            schedule_standing_orders_interval_minutes=60,
+        )
+
+        dispatched_ids: list[str] = []
+        fake_now = datetime(2026, 4, 14, 12, 0, tzinfo=cfg.tz)
+
+        for minute in range(5):
+            tick_time = fake_now.replace(minute=minute)
+            with (
+                patch("agent_os.scheduler._now", return_value=tick_time),
+                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.runner.run_standing_orders", new_callable=AsyncMock),
+            ):
+                result = await tick(config=cfg)
+            for d in result.dispatched:
+                if d.type == "standing_orders":
+                    dispatched_ids.append(d.agent)
+
+        assert set(dispatched_ids) == set(FIVE_AGENT_IDS), f"Expected all 5 agents, got {dispatched_ids}"
+
+    @pytest.mark.asyncio
+    async def test_only_one_standing_order_per_tick(self, tmp_path):
+        """A single tick dispatches at most one standing-order agent."""
         cfg = _make_minimal_cfg(
             tmp_path,
             schedule_standing_orders_enabled=True,
@@ -533,10 +565,155 @@ class TestStandingOrdersMultiAgent:
             result = await tick(config=cfg)
 
         so_dispatches = [d for d in result.dispatched if d.type == "standing_orders"]
-        assert len(so_dispatches) == 5, f"Only {len(so_dispatches)}/5 agents got standing orders"
-        dispatched_ids = {d.agent for d in so_dispatches}
-        assert dispatched_ids == set(FIVE_AGENT_IDS)
-        assert mock_so.call_count == 5
+        assert len(so_dispatches) == 1, f"Expected 1 dispatch per tick, got {len(so_dispatches)}"
+        assert mock_so.call_count == 1
+
+
+class TestCycleOnePerTick:
+    """Cycles must dispatch at most one agent per tick.
+
+    The original design serialized N ``run_cycle`` awaits in a single tick
+    window. With 5 agents doing LLM-backed work, the systemd oneshot
+    timeout killed the tick before later agents ran.
+
+    Fix: dispatch the first due agent and break. Cadence timestamps
+    self-stagger — after the first round each agent's mark is offset by
+    ~1 minute, so they never bunch up again.
+    """
+
+    @pytest.mark.asyncio
+    async def test_only_one_cycle_per_tick(self, tmp_path):
+        """A single tick dispatches at most one cycle agent."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_cycles_enabled=True,
+            schedule_cycles_interval_minutes=15,
+        )
+
+        fake_now = datetime(2026, 4, 14, 12, 0, tzinfo=cfg.tz)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.runner.run_cycle", new_callable=AsyncMock) as mock_cycle,
+        ):
+            result = await tick(config=cfg)
+
+        cycle_dispatches = [d for d in result.dispatched if d.type == "cycle"]
+        assert len(cycle_dispatches) == 1, f"Expected 1 dispatch per tick, got {len(cycle_dispatches)}"
+        assert cycle_dispatches[0].agent == "agent-000-steward"  # First in list
+        assert mock_cycle.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_all_agents_dispatched_across_ticks(self, tmp_path):
+        """All 5 agents get cycles over 5 consecutive ticks."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_cycles_enabled=True,
+            schedule_cycles_interval_minutes=15,
+        )
+
+        dispatched_agents: list[str] = []
+
+        for minute in range(5):
+            fake_now = datetime(2026, 4, 14, 12, minute, tzinfo=cfg.tz)
+            with (
+                patch("agent_os.scheduler._now", return_value=fake_now),
+                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                patch("agent_os.runner.run_cycle", new_callable=AsyncMock),
+            ):
+                result = await tick(config=cfg)
+            for d in result.dispatched:
+                if d.type == "cycle":
+                    dispatched_agents.append(d.agent)
+
+        assert len(dispatched_agents) == 5, f"Expected 5 dispatches over 5 ticks, got {len(dispatched_agents)}"
+        assert set(dispatched_agents) == set(FIVE_AGENT_IDS)
+
+    @pytest.mark.asyncio
+    async def test_cycle_error_marks_cadence(self, tmp_path):
+        """A failed cycle marks cadence so the failing agent doesn't block others."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_cycles_enabled=True,
+            schedule_cycles_interval_minutes=15,
+        )
+
+        fake_now = datetime(2026, 4, 14, 12, 0, tzinfo=cfg.tz)
+
+        # First tick: agent-000 fails
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch(
+                "agent_os.runner.run_cycle",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("LLM down"),
+            ),
+        ):
+            result = await tick(config=cfg)
+
+        cycle_dispatches = [d for d in result.dispatched if d.type == "cycle"]
+        assert len(cycle_dispatches) == 1
+        assert "error" in cycle_dispatches[0].result
+
+        # Second tick at same time: agent-000 is NOT retried (cadence marked),
+        # agent-001 gets dispatched instead.
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.runner.run_cycle", new_callable=AsyncMock) as mock_cycle,
+        ):
+            result = await tick(config=cfg)
+
+        cycle_dispatches = [d for d in result.dispatched if d.type == "cycle"]
+        assert len(cycle_dispatches) == 1
+        assert cycle_dispatches[0].agent == "agent-001-maker"
+        mock_cycle.assert_called_once_with("agent-001-maker", config=cfg)
+
+    @pytest.mark.asyncio
+    async def test_locked_agent_skipped_next_dispatched(self, tmp_path):
+        """A locked agent is skipped; the next due agent dispatches in the same tick."""
+        cfg = _make_minimal_cfg(
+            tmp_path,
+            schedule_cycles_enabled=True,
+            schedule_cycles_interval_minutes=15,
+        )
+
+        fake_now = datetime(2026, 4, 14, 12, 0, tzinfo=cfg.tz)
+
+        # Lock returns None for steward (index 0), real lock for others
+        original_acquire = __import__("agent_os.scheduler", fromlist=["acquire_lock"]).acquire_lock
+
+        def selective_lock(agent_id, mode, *, config=None):
+            if agent_id == "agent-000-steward":
+                return None
+            return original_acquire(agent_id, mode, config=config)
+
+        with (
+            patch("agent_os.scheduler._now", return_value=fake_now),
+            patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+            patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+            patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+            patch("agent_os.scheduler.acquire_lock", side_effect=selective_lock),
+            patch("agent_os.runner.run_cycle", new_callable=AsyncMock) as mock_cycle,
+        ):
+            result = await tick(config=cfg)
+
+        # Steward was locked (skipped), maker dispatched
+        assert "cycle:agent-000-steward locked" in result.skipped
+        cycle_dispatches = [d for d in result.dispatched if d.type == "cycle"]
+        assert len(cycle_dispatches) == 1
+        assert cycle_dispatches[0].agent == "agent-001-maker"
+        mock_cycle.assert_called_once()
 
 
 class TestDrivesMultiAgent:
@@ -807,21 +984,22 @@ class TestWeeklySimulation:
                     if d.type == "dreams":
                         dream_count[d.agent] += 1
 
-            # --- Standing orders (cadence always due — no cadence files persisted) ---
-            tick_time = day_start.replace(hour=12, minute=0)
-            with (
-                patch("agent_os.scheduler._now", return_value=tick_time),
-                patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
-                patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
-                patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
-                patch("agent_os.runner.run_standing_orders", new_callable=AsyncMock),
-                patch("agent_os.scheduler._is_time_match", return_value=False),
-                patch("agent_os.scheduler._is_weekend", return_value=is_weekend),
-            ):
-                result = await tick(config=cfg)
-            for d in result.dispatched:
-                if d.type == "standing_orders":
-                    so_count[d.agent] += 1
+            # --- Standing orders (one agent per tick, 5 ticks to cover all) ---
+            for so_minute in range(5):
+                tick_time = day_start.replace(hour=12, minute=so_minute)
+                with (
+                    patch("agent_os.scheduler._now", return_value=tick_time),
+                    patch("agent_os.scheduler.is_within_operating_hours", return_value=True),
+                    patch("agent_os.scheduler.check_budget", return_value=_FakeBudget()),
+                    patch("agent_os.scheduler.list_agents", return_value=FIVE_AGENTS),
+                    patch("agent_os.runner.run_standing_orders", new_callable=AsyncMock),
+                    patch("agent_os.scheduler._is_time_match", return_value=False),
+                    patch("agent_os.scheduler._is_weekend", return_value=is_weekend),
+                ):
+                    result = await tick(config=cfg)
+                for d in result.dispatched:
+                    if d.type == "standing_orders":
+                        so_count[d.agent] += 1
 
             # --- Drive consultation window (staggered, mirrors dream window) ---
             drive_hour = 13 if is_weekend else 17
