@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -906,6 +906,10 @@ def create_task_human(
 
     _write_frontmatter(dest_dir / f"{task_id}.md", meta, body)
 
+    # Detect bulk-created batches (3+ in same minute → non-promotable)
+    if destination == "backlog":
+        _detect_and_mark_batch(meta, config=cfg)
+
     return task_id, destination
 
 
@@ -913,6 +917,162 @@ def promote_task(task_id: str, *, config: Config | None = None) -> Path | None:
     """Move backlog/ -> queued/. Called by human via dashboard or CLI."""
     cfg = config or get_config()
     return _move_task(task_id, cfg.tasks_backlog, cfg.tasks_queued, "queued")
+
+
+def agent_promote_task(
+    task_id: str,
+    by_agent_id: str,
+    *,
+    config: Config | None = None,
+) -> Path:
+    """Agent-initiated task promotion: backlog/ -> queued/.
+
+    Unlike ``promote_task()`` (human-only, no guardrails), this enforces:
+
+    - ``promotable: false`` flag (hard human veto)
+    - Caller authorization (must be assignee or Steward)
+    - Per-cycle and per-day rate limits
+
+    Per decision-2026-0502-001.
+
+    Returns:
+        Path to the promoted task in queued/.
+
+    Raises:
+        FileNotFoundError: task not in backlog/ (or moved by another process).
+        PermissionError: auth check, promotable veto, or rate-limit violation.
+    """
+    cfg = config or get_config()
+
+    # Find the task in backlog
+    candidates = list(cfg.tasks_backlog.glob(f"{task_id}*"))
+    if not candidates:
+        raise FileNotFoundError(f"Task {task_id} not found in backlog/")
+    task_file = candidates[0]
+
+    meta, body = _parse_frontmatter(task_file)
+
+    # Hard veto: promotable: false
+    if meta.get("promotable") is False:
+        raise PermissionError(f"Task {task_id} has promotable: false — reserved for human promotion.")
+
+    # Authorization: caller must be assignee or Steward
+    assigned_to = meta.get("assigned_to", "")
+    steward_id = "agent-000-steward"
+    if by_agent_id != assigned_to and by_agent_id != steward_id:
+        raise PermissionError(
+            f"Agent {by_agent_id} cannot promote {task_id}: "
+            f"must be the assignee ({assigned_to!r}) or the Steward ({steward_id})."
+        )
+
+    # Rate limits
+    _check_promotion_rate_limits(by_agent_id, config=cfg)
+
+    # Promote: update frontmatter and move
+    meta["status"] = "queued"
+    meta["promoted_by"] = by_agent_id
+    meta["promoted_at"] = _now_iso(config=cfg)
+    _write_frontmatter(task_file, meta, body)
+
+    dest = cfg.tasks_queued / task_file.name
+    try:
+        shutil.move(str(task_file), str(dest))
+    except (FileNotFoundError, OSError):
+        raise FileNotFoundError(f"Task {task_id} was moved by another process during promotion.") from None
+
+    log_action(
+        by_agent_id,
+        "task_promoted",
+        f"Promoted {task_id} from backlog/ to queued/",
+        {"task_id": task_id, "promoted_by": by_agent_id},
+        config=cfg,
+    )
+
+    return dest
+
+
+def _check_promotion_rate_limits(
+    agent_id: str,
+    *,
+    config: Config | None = None,
+) -> None:
+    """Enforce per-cycle and per-day agent promotion rate limits.
+
+    Per decision-2026-0502-001:
+    - 2 promotions / agent / cycle (Steward: 5 / cycle)
+    - 5 promotions / agent / calendar day
+
+    Counts are derived from frontmatter scan of queued/ and in-progress/.
+
+    Raises PermissionError if any limit is exceeded.
+    """
+    cfg = config or get_config()
+    now = datetime.now(cfg.tz)
+
+    cycle_minutes = cfg.schedule_cycles_interval_minutes
+    cycle_cutoff = now - timedelta(minutes=cycle_minutes)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    cycle_count = 0
+    day_count = 0
+
+    for search_dir in (cfg.tasks_queued, cfg.tasks_in_progress):
+        if not search_dir.exists():
+            continue
+        for f in search_dir.iterdir():
+            if not f.name.endswith(".md"):
+                continue
+            meta, _ = _parse_frontmatter(f)
+            if meta.get("promoted_by") != agent_id:
+                continue
+            promoted_at_str = meta.get("promoted_at")
+            if not promoted_at_str:
+                continue
+            try:
+                promoted_at = datetime.fromisoformat(str(promoted_at_str))
+            except (ValueError, TypeError):
+                continue
+
+            if promoted_at >= day_start:
+                day_count += 1
+            if promoted_at >= cycle_cutoff:
+                cycle_count += 1
+
+    # Per-cycle limit: Steward gets 5, everyone else gets 2
+    steward_id = "agent-000-steward"
+    cycle_limit = 5 if agent_id == steward_id else 2
+    if cycle_count >= cycle_limit:
+        raise PermissionError(
+            f"Per-cycle promotion limit reached: {cycle_count}/{cycle_limit} (last {cycle_minutes} min)."
+        )
+
+    # Per-day limit: 5 for all agents
+    day_limit = 5
+    if day_count >= day_limit:
+        raise PermissionError(f"Per-day promotion limit reached: {day_count}/{day_limit} today.")
+
+
+def demote_task(task_id: str, *, config: Config | None = None) -> Path | None:
+    """Move a task from queued/ back to backlog/ (human-only rollback).
+
+    Inverse of promotion — lets the exec chair undo a premature agent
+    promotion. Clears ``promoted_by`` and ``promoted_at`` from frontmatter.
+    """
+    cfg = config or get_config()
+    candidates = list(cfg.tasks_queued.glob(f"{task_id}*"))
+    if not candidates:
+        return None
+    task_file = candidates[0]
+
+    meta, body = _parse_frontmatter(task_file)
+    meta["status"] = "backlog"
+    meta.pop("promoted_by", None)
+    meta.pop("promoted_at", None)
+    _write_frontmatter(task_file, meta, body)
+
+    dest = cfg.tasks_backlog / task_file.name
+    shutil.move(str(task_file), str(dest))
+    return dest
 
 
 def reject_task(task_id: str, reason: str, *, config: Config | None = None) -> Path | None:
@@ -950,6 +1110,60 @@ def reject_task(task_id: str, reason: str, *, config: Config | None = None) -> P
         )
 
     return dest
+
+
+def _detect_and_mark_batch(new_meta: dict, *, config: Config | None = None) -> bool:
+    """Detect bulk-created batches in backlog and mark them non-promotable.
+
+    Rule: 3+ tasks with the same ``created_by`` and ``created_at`` within the
+    same calendar minute -> all marked ``promotable: false``.
+
+    Called after human task creation. Returns True if a batch was detected.
+
+    Per decision-2026-0502-001: bulk-created exec-chair batches default to
+    non-promotable, preventing agents from cherry-picking from curated sets.
+    """
+    cfg = config or get_config()
+    created_by = new_meta.get("created_by", "")
+    created_at_str = new_meta.get("created_at", "")
+    if not created_by or not created_at_str:
+        return False
+
+    try:
+        created_at = datetime.fromisoformat(str(created_at_str))
+    except (ValueError, TypeError):
+        return False
+
+    minute_start = created_at.replace(second=0, microsecond=0)
+    minute_end = minute_start + timedelta(minutes=1)
+
+    if not cfg.tasks_backlog.exists():
+        return False
+
+    batch_files: list[Path] = []
+    for f in cfg.tasks_backlog.iterdir():
+        if not f.name.endswith(".md"):
+            continue
+        meta, _ = _parse_frontmatter(f)
+        if meta.get("created_by") != created_by:
+            continue
+        task_ts_str = meta.get("created_at", "")
+        try:
+            task_ts = datetime.fromisoformat(str(task_ts_str))
+        except (ValueError, TypeError):
+            continue
+        if minute_start <= task_ts < minute_end:
+            batch_files.append(f)
+
+    if len(batch_files) >= 3:
+        for f in batch_files:
+            meta, body = _parse_frontmatter(f)
+            if meta.get("promotable") is not False:
+                meta["promotable"] = False
+                _write_frontmatter(f, meta, body)
+        return True
+
+    return False
 
 
 def list_backlog(*, config: Config | None = None) -> list[tuple[dict, str, Path]]:

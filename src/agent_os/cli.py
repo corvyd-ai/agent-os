@@ -457,6 +457,13 @@ def cmd_backlog(args):
         else:
             print(f"Error: {args.task_id} not found in backlog/")
             sys.exit(1)
+    elif action == "demote":
+        result = aios.demote_task(args.task_id)
+        if result:
+            print(f"Demoted {args.task_id} back to backlog/ at {result}")
+        else:
+            print(f"Error: {args.task_id} not found in queued/")
+            sys.exit(1)
     else:
         # List backlog
         items = aios.list_backlog()
@@ -2008,7 +2015,7 @@ Common commands, grouped by intent:
     budget-set         Update daily / weekly / monthly caps
     autonomy           Set per-agent autonomy level
     schedule-toggle    Flip scheduler features on/off
-    backlog {promote,reject}  Move tasks out of backlog
+    backlog {promote,reject,demote}  Manage backlog and queued tasks
 
   Create
     init <name>   Create a new company filesystem
@@ -2133,6 +2140,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bl_reject = backlog_sub.add_parser("reject", help="Reject backlog item")
     p_bl_reject.add_argument("task_id", help="Task ID to reject")
     p_bl_reject.add_argument("--reason", default=None, help="Rejection reason")
+
+    p_bl_demote = backlog_sub.add_parser("demote", help="Move task from queued back to backlog")
+    p_bl_demote.add_argument("task_id", help="Task ID to demote")
 
     p_backlog.set_defaults(func=cmd_backlog)
 
