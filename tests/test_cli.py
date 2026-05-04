@@ -7,7 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_os.cli import INIT_DIRS, _find_repo_root, cmd_budget, cmd_init, cmd_update
+from agent_os.cli import (
+    INIT_DIRS,
+    _find_repo_root,
+    _is_agent_os_repo,
+    _resolve_repo_root,
+    cmd_budget,
+    cmd_init,
+    cmd_update,
+)
 from agent_os.config import Config
 
 # ── init command ────────────────────────────────────────────────────
@@ -110,6 +118,118 @@ def test_find_repo_root_returns_path():
     assert root is not None
     assert (root / ".git").exists()
     assert (root / "pyproject.toml").exists()
+
+
+def test_is_agent_os_repo_positive():
+    """_is_agent_os_repo should return True for the actual agent-os repo."""
+    root = _find_repo_root()
+    if root is None:
+        pytest.skip("Not running from a git checkout")
+    assert _is_agent_os_repo(root) is True
+
+
+def test_is_agent_os_repo_negative(tmp_path):
+    """_is_agent_os_repo should return False for a directory without the
+    agent-os source layout."""
+    (tmp_path / ".git").mkdir()
+    assert _is_agent_os_repo(tmp_path) is False
+
+
+def test_find_repo_root_skips_unrelated_git_repo(tmp_path, monkeypatch):
+    """Regression: _find_repo_root must NOT return an unrelated .git repo
+    that happens to sit above the package directory.
+
+    Simulates the corvyd-prod-01 scenario: the venv is under /srv/corvyd/
+    which has its own .git (autocommit repo), but that repo is not agent-os.
+    """
+    # Build a fake directory tree:
+    #   tmp_path/.git                 (unrelated repo — no src/agent_os/)
+    #   tmp_path/venv/lib/.../agent_os/  (where __file__ would be)
+    (tmp_path / ".git").mkdir()
+    fake_pkg = tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "agent_os"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "cli.py").write_text("# placeholder")
+
+    from agent_os import cli
+
+    def patched_find_repo_root():
+        current = fake_pkg
+        while current != current.parent:
+            if (current / ".git").exists() and cli._is_agent_os_repo(current):
+                return current
+            current = current.parent
+        return None
+
+    monkeypatch.setattr(cli, "_find_repo_root", patched_find_repo_root)
+
+    result = patched_find_repo_root()
+    assert result is None, (
+        f"_find_repo_root should return None when the only .git above "
+        f"the package is an unrelated repo, but got {result}"
+    )
+
+
+def test_find_repo_root_finds_correct_repo_when_unrelated_above(tmp_path, monkeypatch):
+    """When both an unrelated and a valid agent-os repo exist in the path,
+    _find_repo_root should return the valid one."""
+    from agent_os import cli
+
+    # Build:
+    #   tmp_path/.git                           (unrelated outer repo)
+    #   tmp_path/agent-os/.git                  (valid agent-os repo)
+    #   tmp_path/agent-os/src/agent_os/__init__.py
+    (tmp_path / ".git").mkdir()
+    agent_os_repo = tmp_path / "agent-os"
+    agent_os_repo.mkdir()
+    (agent_os_repo / ".git").mkdir()
+    (agent_os_repo / "src" / "agent_os").mkdir(parents=True)
+    (agent_os_repo / "src" / "agent_os" / "__init__.py").write_text("")
+
+    fake_pkg = agent_os_repo / "src" / "agent_os"
+
+    def patched_find():
+        current = fake_pkg
+        while current != current.parent:
+            if (current / ".git").exists() and cli._is_agent_os_repo(current):
+                return current
+            current = current.parent
+        return None
+
+    result = patched_find()
+    assert result == agent_os_repo
+
+
+def test_resolve_repo_root_with_explicit_repo(tmp_path):
+    """--repo flag should override discovery and validate the path."""
+    # Create a valid agent-os-shaped repo
+    repo = tmp_path / "my-agent-os"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (repo / "src" / "agent_os").mkdir(parents=True)
+    (repo / "src" / "agent_os" / "__init__.py").write_text("")
+
+    args = SimpleNamespace(repo=str(repo))
+    result = _resolve_repo_root(args, context="test")
+    assert result == repo.resolve()
+
+
+def test_resolve_repo_root_rejects_invalid_explicit_repo(tmp_path):
+    """--repo pointing at a non-agent-os dir should error."""
+    # Has .git but is not agent-os
+    (tmp_path / ".git").mkdir()
+
+    args = SimpleNamespace(repo=str(tmp_path))
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_repo_root(args, context="test")
+    assert exc_info.value.code == 1
+
+
+def test_resolve_repo_root_rejects_missing_git(tmp_path):
+    """--repo pointing at a dir with no .git should error."""
+    args = SimpleNamespace(repo=str(tmp_path))
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_repo_root(args, context="test")
+    assert exc_info.value.code == 1
 
 
 def test_update_dispatches_to_wheel_when_no_git_repo(monkeypatch):

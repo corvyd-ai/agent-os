@@ -498,16 +498,64 @@ def cmd_archive(args):
 # --- update command ---
 
 
+def _is_agent_os_repo(path: Path) -> bool:
+    """Check whether *path* looks like the agent-os source repo.
+
+    We look for the canonical ``src/agent_os/__init__.py`` — this file
+    exists in every agent-os checkout and is specific enough to avoid
+    false positives on unrelated repos (e.g. a company autocommit repo
+    that happens to sit higher in the filesystem).
+    """
+    return (path / "src" / "agent_os" / "__init__.py").is_file()
+
+
 def _find_repo_root() -> Path:
-    """Find the git repo root for the installed agent-os package."""
+    """Find the git repo root for the installed agent-os package.
+
+    Walks up from the installed package directory looking for a ``.git``
+    directory.  When one is found, it is **validated**: the repo must
+    contain ``src/agent_os/__init__.py`` — the hallmark of an agent-os
+    source checkout.  Repos that fail the check are skipped, and the
+    walk continues upward.
+
+    Returns ``None`` when no validated agent-os repo is found (typical
+    for wheel installs where the venv sits under an unrelated git repo).
+    """
     pkg_dir = Path(__file__).resolve().parent
     # Walk up from the package directory to find the .git root
     current = pkg_dir
     while current != current.parent:
-        if (current / ".git").exists():
+        if (current / ".git").exists() and _is_agent_os_repo(current):
             return current
         current = current.parent
     return None
+
+
+def _resolve_repo_root(args, *, context: str = "update") -> Path | None:
+    """Resolve the agent-os repo root, honouring ``--repo`` if given.
+
+    *context* is used in error messages (e.g. "update", "project backfill").
+    Returns ``None`` when no repo could be found (wheel-install scenario).
+    Exits with a clear error if ``--repo`` was explicitly given but is invalid.
+    """
+    explicit = getattr(args, "repo", None)
+    if explicit is not None:
+        repo = Path(explicit).resolve()
+        if not (repo / ".git").exists():
+            print(
+                f"Error: --repo {explicit} does not contain a .git directory.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not _is_agent_os_repo(repo):
+            print(
+                f"Error: --repo {explicit} does not look like an agent-os source repo "
+                f"(missing src/agent_os/__init__.py).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return repo
+    return _find_repo_root()
 
 
 def cmd_update(args):
@@ -518,7 +566,7 @@ def cmd_update(args):
     release and reinstalls. Both end by firing release notes so agents
     running on this deployment learn what changed.
     """
-    repo_root = _find_repo_root()
+    repo_root = _resolve_repo_root(args, context="update")
     if repo_root is not None:
         _update_from_git(args, repo_root)
     else:
@@ -1177,13 +1225,16 @@ def cmd_project_backfill(args):
     from .config import get_config
     from .release_notes import build_backfill_entries, write_backfill_notes
 
-    repo_root = _find_repo_root()
+    repo_root = _resolve_repo_root(args, context="project backfill")
     if repo_root is None:
         print(
-            "Error: agent-os is not installed from a git repository — can't read history to backfill.",
+            "Error: could not find an agent-os source repository.",
             file=sys.stderr,
         )
-        print("Install from git if you want to use backfill.", file=sys.stderr)
+        print(
+            "Hint: use --repo /path/to/agent-os to point at a local clone, or install agent-os from a git checkout.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     since = getattr(args, "since", None)
@@ -2212,6 +2263,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip posting the 'release notes enabled' broadcast",
     )
     p_project_backfill.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    p_project_backfill.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "Path to a local agent-os git clone. Overrides automatic discovery. "
+            "Use when the package is installed in a venv under an unrelated git repo."
+        ),
+    )
     _add_common_args(p_project_backfill)
 
     p_project.set_defaults(func=cmd_project)
@@ -2229,6 +2288,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "GitHub release source for wheel installs, format 'owner/repo@tag'. "
             "Overrides [update].source in agent-os.toml. "
             "Default: corvyd-ai/agent-os@latest. Ignored for git-checkout installs."
+        ),
+    )
+    p_update.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "Path to a local agent-os git clone. Overrides automatic discovery. "
+            "Use when the package is installed in a venv under an unrelated git repo."
         ),
     )
     p_update.set_defaults(func=cmd_update)
