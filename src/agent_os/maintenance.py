@@ -19,6 +19,12 @@ from pathlib import Path
 
 from .config import Config, get_config
 
+# Log directories that are not real agents and should be silently
+# skipped by the watchdog and anomaly detection.  "system" holds
+# platform-emitted logs; "human" holds human-initiated actions logged
+# via dashboard/CLI.
+WATCHDOG_SKIP_DIRS: frozenset[str] = frozenset({"system", "human"})
+
 
 @dataclass
 class ArchiveResult:
@@ -217,7 +223,7 @@ def run_watchdog(*, config: Config | None = None) -> WatchdogResult:
         if not agent_dir.is_dir():
             continue
         agent_id = agent_dir.name
-        if agent_id == "system":
+        if agent_id in WATCHDOG_SKIP_DIRS:
             continue
 
         result.agents_checked += 1
@@ -448,7 +454,7 @@ def _detect_anomalies(cfg: Config, today: str) -> list[str]:
         return anomalies
 
     for agent_dir in sorted(cfg.logs_dir.iterdir()):
-        if not agent_dir.is_dir() or agent_dir.name == "system":
+        if not agent_dir.is_dir() or agent_dir.name in WATCHDOG_SKIP_DIRS:
             continue
 
         agent_id = agent_dir.name
