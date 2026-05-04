@@ -78,6 +78,21 @@ class TestWriteSchedulerState:
         state = json.loads(aios_config.scheduler_state_file.read_text())
         assert "scheduler disabled" in state["skipped"]
 
+    def test_no_budget_snapshot_in_state_file(self, aios_config):
+        """State file must NOT contain a budget snapshot — budget is always
+        derived live from the cost JSONL (single source of truth).
+        """
+        result = TickResult(
+            timestamp="2026-03-08T17:00:00Z",
+            enabled=True,
+            budget_tripped=False,
+            outside_hours=False,
+        )
+        write_scheduler_state(result, config=aios_config)
+
+        state = json.loads(aios_config.scheduler_state_file.read_text())
+        assert "budget" not in state, "scheduler-state.json must not contain a budget snapshot"
+
 
 class TestOperatingHoursGatedConstant:
     """Verify the taxonomy is correct."""

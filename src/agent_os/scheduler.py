@@ -194,25 +194,21 @@ def _record_dispatch_outcome(
 
 
 def write_scheduler_state(result: TickResult, *, config: Config | None = None) -> None:
-    """Write scheduler state file for dashboard consumption."""
+    """Write scheduler state file for dashboard consumption.
+
+    Budget data is NOT snapshotted here — it is always derived live from
+    the cost JSONL files via ``check_budget()``.  This avoids a secondary
+    counter that can drift from the primary source.
+    """
     cfg = config or get_config()
     cfg.operations_dir.mkdir(parents=True, exist_ok=True)
 
     state = {
         "last_tick": result.timestamp,
         "enabled": result.enabled,
-        "budget": {},
         "dispatched": [],
         "skipped": result.skipped,
     }
-
-    if not result.budget_tripped:
-        budget = check_budget(config=cfg)
-        state["budget"] = {
-            "daily_spent": round(budget.daily_spent, 2),
-            "daily_cap": budget.daily_cap,
-            "circuit_breaker_tripped": budget.circuit_breaker_tripped,
-        }
 
     for d in result.dispatched:
         state["dispatched"].append(
