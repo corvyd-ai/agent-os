@@ -1092,7 +1092,15 @@ def cmd_digest(args):
     _set_root(args)
     from .maintenance import run_daily_digest
 
-    result = run_daily_digest()
+    window = getattr(args, "window", "today")
+    result = run_daily_digest(window=window)
+
+    if result.window == "yesterday":
+        window_note = f" (yesterday, {result.report_date})"
+    else:
+        window_note = f" (today, {result.report_date})"
+
+    print(f"Digest{window_note}")
     print(f"Tasks: {result.tasks_completed} completed, {result.tasks_failed} failed, {result.tasks_created} created")
     print(f"Agents: {result.agents_healthy} healthy, {result.agents_stale} stale")
     if result.breakers_tripped:
@@ -2305,6 +2313,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # digest
     p_digest = subparsers.add_parser("digest", help="Generate health digest")
+    p_digest.add_argument(
+        "--window",
+        choices=["yesterday", "today"],
+        default="today",
+        help=(
+            "Which day to report on. 'yesterday' reports the prior calendar "
+            "day (used by the cron-driven morning briefing). 'today' reports "
+            "today since midnight (default for interactive CLI use)."
+        ),
+    )
     _add_common_args(p_digest)
     p_digest.set_defaults(func=cmd_digest)
 

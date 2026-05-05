@@ -568,7 +568,7 @@ async def tick(*, config: Config | None = None) -> TickResult:
         record = DispatchRecord(type="digest", agent="system", at=now_iso)
         try:
             get_logger("system").info("tick_dispatch", "Running daily digest", {"type": "digest"})
-            maintenance.run_daily_digest(config=cfg)
+            maintenance.run_daily_digest(window="yesterday", config=cfg)
             record.result = "done"
         except Exception as e:
             record.result = f"error: {e}"
