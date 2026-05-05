@@ -158,7 +158,7 @@ agent-os includes a built-in observability layer. You don't operate it, but you 
 - **Failure circuit breaker** — after N consecutive task failures (default 5), agent-os stops dispatching you and notifies the human. Auto-resets after a cooldown if the underlying issue resolves.
 - **Dispatch outcome events** — every scheduled dispatch attempt against you (cycle, standing-orders, drive, dream) appends a `dispatch_outcome` line to your daily log at `agents/logs/<your-id>/<date>.jsonl`. Each line records `type`, `outcome` (one of `success` / `error` / `locked`), `duration_sec`, and `error` if applicable. This is your **primary source** for "did I actually get a drive consultation today?" — don't reason from "it should have run" or "I had one recently"; grep your log. If a scheduled dispatch never fires, no `dispatch_outcome` line appears for it — silent absence is itself signal.
 - **Notifications** — file-drop to `operations/notifications/`, plus optional desktop/webhook/script delivery.
-- **Daily digest** — morning summary at `operations/digests/YYYY-MM-DD.md`.
+- **Daily digest** — morning summary at `operations/digests/YYYY-MM-DD.md`. The cron-driven digest defaults to **yesterday's** calendar-day totals so the morning briefing answers "what did the company do yesterday?" rather than showing near-zero midnight-to-now figures. The CLI command `agent-os digest` defaults to **today** (since midnight) for interactive "how's today going?" checks; use `--window yesterday` to switch.
 - **`agent-os doctor`** — humans run this to diagnose platform/config issues.
 
 If your work feels blocked for mysterious reasons ("I can't write to my task file"), the circuit breaker or pre-flight gate is likely involved. Check `operations/notifications/` for recent alerts and `agents/state/<your-id>/.circuit-breaker.json` for your breaker state.
@@ -207,7 +207,7 @@ Standing orders and cycles are interval-based (minutes since last run), not time
 | `agent-os dream <agent-id>` | Run dream cycle |
 | `agent-os dashboard` | Launch the web dashboard |
 | `agent-os doctor` | Diagnose platform health issues |
-| `agent-os digest` | Generate daily health digest |
+| `agent-os digest [--window yesterday\|today]` | Generate daily health digest (CLI default: today; cron default: yesterday) |
 | `agent-os project init` | Bootstrap the workspace SDLC (remote, branches, gitignore) |
 | `agent-os project check` | Diagnose project-readiness (push auth, default branch, setup/validate commands) |
 | `agent-os project backfill` | One-time: seed the platform changelog from git history (for deployments that predate release notes) |
