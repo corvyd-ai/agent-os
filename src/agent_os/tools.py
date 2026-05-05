@@ -29,6 +29,7 @@ AIOS_TOOL_NAMES = [
     "mcp__aios__post_broadcast",
     "mcp__aios__log_action",
     "mcp__aios__create_task",
+    "mcp__aios__promote_task",
 ]
 
 
@@ -205,6 +206,32 @@ def build_aios_tools(
         except PermissionError as e:
             return _text_response(str(e), is_error=True)
 
+    @tool(
+        name="promote_task",
+        description=(
+            "Promote a task from backlog/ to queued/. Requires high autonomy. "
+            "You can only promote tasks assigned to you, or any task if you are "
+            "the Steward (agent-000-steward). Tasks marked promotable: false "
+            "cannot be promoted by agents. Rate-limited to 2 per cycle "
+            "(Steward: 5) and 5 per day."
+        ),
+        input_schema={"task_id": str},
+    )
+    async def promote_task_tool(args):
+        task_id = args["task_id"]
+        # Gate on high autonomy
+        autonomy = aios.get_autonomy_level(agent_id, config=cfg)
+        if autonomy != "high":
+            return _text_response(
+                f"Promotion requires high autonomy. Agent {agent_id} has {autonomy!r} autonomy.",
+                is_error=True,
+            )
+        try:
+            result = aios.agent_promote_task(task_id, by_agent_id=agent_id, config=cfg)
+            return _text_response(f"Promoted {task_id} to queued/ at {result}")
+        except (FileNotFoundError, PermissionError) as e:
+            return _text_response(str(e), is_error=True)
+
     return [
         complete_task_tool,
         fail_task_tool,
@@ -213,6 +240,7 @@ def build_aios_tools(
         post_broadcast_tool,
         log_action_tool,
         create_task_tool,
+        promote_task_tool,
     ]
 
 

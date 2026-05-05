@@ -53,12 +53,17 @@ def _update_toml(section: str, updates: dict) -> None:
 
 @router.get("/schedule")
 async def get_schedule():
-    """Current schedule config + next due + budget status."""
+    """Current schedule config + next due + budget status.
+
+    Budget summary is derived live from cost JSONL via ``check_budget()``,
+    not from a stale snapshot in scheduler-state.json.
+    """
+    from agent_os.budget import check_budget
+
     data = _read_toml()
     schedule = data.get("schedule", {})
-    budget = data.get("budget", {})
 
-    # Read scheduler state file
+    # Read scheduler state file (dispatch metadata only — no budget)
     state_file = COMPANY_ROOT / "operations" / "scheduler-state.json"
     state = {}
     if state_file.exists():
@@ -67,11 +72,14 @@ async def get_schedule():
         with contextlib.suppress(json.JSONDecodeError):
             state = json.loads(state_file.read_text())
 
+    # Budget always derived live from the cost JSONL
+    budget_status = check_budget()
+
     return {
         "config": schedule,
         "budget_summary": {
-            "daily_cap": budget.get("daily_cap", 100.0),
-            "weekly_cap": budget.get("weekly_cap", 500.0),
+            "daily_cap": budget_status.daily_cap,
+            "weekly_cap": budget_status.weekly_cap,
         },
         "state": state,
     }
@@ -144,49 +152,37 @@ async def trigger_schedule(body: ScheduleTrigger):
 
 @router.get("/budget")
 async def get_budget():
-    """Full budget status (daily/weekly/monthly, per-agent)."""
+    """Full budget status (daily/weekly/monthly, per-agent).
+
+    Derives all totals from the cost JSONL via ``check_budget()`` — the
+    single source of truth.  No separate counters or snapshots.
+    """
+    from agent_os.budget import check_agent_budget, check_budget
+    from agent_os.config import get_config
+
+    cfg = get_config()
+    status = check_budget(config=cfg)
+
     data = _read_toml()
     budget = data.get("budget", {})
 
-    # Read today's costs (must use company timezone — cost files are written in it)
-    from ..config import company_today
-
-    today = company_today()
-    costs_file = COMPANY_ROOT / "finance" / "costs" / f"{today}.jsonl"
-    daily_spent = 0.0
-    agent_spent: dict[str, float] = {}
-
-    if costs_file.exists():
-        for line in costs_file.read_text().splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-                cost = entry.get("cost_usd", 0.0)
-                agent = entry.get("agent", "unknown")
-                daily_spent += cost
-                agent_spent[agent] = agent_spent.get(agent, 0.0) + cost
-            except json.JSONDecodeError:
-                continue
-
-    daily_cap = budget.get("daily_cap", 100.0)
-    agent_caps = budget.get("agent_daily_caps", {})
+    agent_caps = cfg.agent_daily_caps
 
     return {
         "daily": {
-            "spent": round(daily_spent, 2),
-            "cap": daily_cap,
-            "remaining": round(max(0, daily_cap - daily_spent), 2),
-            "pct": round(daily_spent / daily_cap * 100, 1) if daily_cap > 0 else 0,
-            "tripped": daily_spent >= daily_cap,
+            "spent": round(status.daily_spent, 2),
+            "cap": status.daily_cap,
+            "remaining": round(status.daily_remaining, 2),
+            "pct": round(status.daily_pct, 1),
+            "tripped": status.circuit_breaker_tripped,
         },
-        "weekly_cap": budget.get("weekly_cap", 500.0),
-        "monthly_cap": budget.get("monthly_cap", 2000.0),
+        "weekly_cap": status.weekly_cap,
+        "monthly_cap": status.monthly_cap,
         "per_agent": {
             agent_id: {
-                "spent": round(agent_spent.get(agent_id, 0.0), 2),
+                "spent": round(check_agent_budget(agent_id, config=cfg)[1], 2),
                 "cap": cap,
-                "within": agent_spent.get(agent_id, 0.0) < cap,
+                "within": check_agent_budget(agent_id, config=cfg)[0],
             }
             for agent_id, cap in agent_caps.items()
         },

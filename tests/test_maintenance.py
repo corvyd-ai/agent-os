@@ -5,7 +5,13 @@ import time
 from datetime import UTC, datetime, timedelta
 
 from agent_os.config import Config
-from agent_os.maintenance import run_archive, run_log_archive, run_manifest, run_watchdog
+from agent_os.maintenance import (
+    _detect_anomalies,
+    run_archive,
+    run_log_archive,
+    run_manifest,
+    run_watchdog,
+)
 
 
 class TestRunArchive:
@@ -138,6 +144,41 @@ class TestRunWatchdog:
         result = run_watchdog(config=aios_config)
         assert result.agents_checked == 0
 
+    def test_skips_human_dir(self, aios_config):
+        """logs/human/ is for human-initiated actions, not an agent — skip silently."""
+        human_dir = aios_config.logs_dir / "human"
+        human_dir.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        # Even with a log file present, should not be counted
+        (human_dir / f"{today}.jsonl").write_text('{"action": "task_created"}\n')
+
+        result = run_watchdog(config=aios_config)
+        assert result.agents_checked == 0
+        assert result.agents_stale == 0
+        assert result.alerts == []
+
+    def test_skips_human_and_system_alongside_real_agents(self, aios_config):
+        """Both human and system dirs are skipped; real agents are still checked."""
+        cfg = Config(
+            company_root=aios_config.company_root,
+            schedule_watchdog_alert_threshold_minutes=45,
+        )
+        # Create skip dirs
+        (cfg.logs_dir / "system").mkdir(parents=True, exist_ok=True)
+        (cfg.logs_dir / "human").mkdir(parents=True, exist_ok=True)
+
+        # Create a real healthy agent
+        agent_dir = cfg.logs_dir / "agent-001"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        entry = {"timestamp": datetime.now(UTC).isoformat(), "action": "test"}
+        (agent_dir / f"{today}.jsonl").write_text(json.dumps(entry) + "\n")
+
+        result = run_watchdog(config=cfg)
+        assert result.agents_checked == 1
+        assert result.agents_healthy == 1
+        assert result.alerts == []
+
 
 class TestLogArchive:
     def test_archives_old_logs(self, aios_config):
@@ -209,3 +250,34 @@ class TestLogArchive:
         with gzip.open(gz_path, "rt") as f:
             decompressed = f.read()
         assert decompressed == content
+
+
+class TestDetectAnomalies:
+    def test_skips_human_dir(self, aios_config):
+        """_detect_anomalies should ignore logs/human/ just like logs/system/."""
+        human_dir = aios_config.logs_dir / "human"
+        human_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        anomalies = _detect_anomalies(aios_config, today)
+        # human dir should not produce a "zero activity today" anomaly
+        assert anomalies == []
+
+    def test_skips_system_dir(self, aios_config):
+        system_dir = aios_config.logs_dir / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        anomalies = _detect_anomalies(aios_config, today)
+        assert anomalies == []
+
+    def test_reports_real_agent_with_no_log(self, aios_config):
+        """A real agent dir with no log file should produce an anomaly."""
+        agent_dir = aios_config.logs_dir / "agent-001"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        anomalies = _detect_anomalies(aios_config, today)
+        assert len(anomalies) == 1
+        assert "agent-001" in anomalies[0]
+        assert "zero activity" in anomalies[0]

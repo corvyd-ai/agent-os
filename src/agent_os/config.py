@@ -112,6 +112,7 @@ class Config:
     schedule_drives_enabled: bool = True
     schedule_drives_weekday_times: list[str] = field(default_factory=lambda: ["17:00"])
     schedule_drives_weekend_times: list[str] = field(default_factory=lambda: ["13:00"])
+    schedule_drives_stagger_minutes: int = 10
     schedule_dreams_enabled: bool = True
     schedule_dreams_time: str = "02:00"
     schedule_dreams_stagger_minutes: int = 10
@@ -158,6 +159,14 @@ class Config:
     # verify secrets like ANTHROPIC_API_KEY are configured even when the
     # invoking shell doesn't have them loaded. Empty = only check os.environ.
     runtime_env_file: str = ""
+
+    # --- Self-update ---
+    # GitHub release source for `agent-os update` when the platform is
+    # installed from a wheel (no local git checkout). Format: "owner/repo@tag".
+    # The default points at the upstream `latest` release CI publishes on
+    # every merge to main. Forks/private rebuilds set this to their own
+    # repo+tag pair; CLI `--source` overrides at invocation time.
+    update_source: str = "corvyd-ai/agent-os@latest"
 
     # --- Project (SDLC) ---
     project_repo_path: str = "."  # relative to company_root, or absolute
@@ -324,6 +333,8 @@ class Config:
             kwargs["schedule_drives_weekday_times"] = list(drives["weekday_times"])
         if "weekend_times" in drives:
             kwargs["schedule_drives_weekend_times"] = list(drives["weekend_times"])
+        if "stagger_minutes" in drives:
+            kwargs["schedule_drives_stagger_minutes"] = int(drives["stagger_minutes"])
 
         # [schedule.dreams]
         dreams = schedule.get("dreams", {})
@@ -394,6 +405,11 @@ class Config:
             kwargs["runtime_user"] = runtime["user"]
         if "env_file" in runtime:
             kwargs["runtime_env_file"] = runtime["env_file"]
+
+        # [update]
+        update = data.get("update", {})
+        if "source" in update:
+            kwargs["update_source"] = str(update["source"])
 
         # [roles]
         roles = data.get("roles", {})
@@ -665,10 +681,27 @@ _config: Config | None = None
 
 
 def get_config() -> Config:
-    """Return the global Config singleton, creating it on first access."""
+    """Return the global Config singleton, creating it on first access.
+
+    On first creation, attempts to discover and load an ``agent-os.toml``
+    using the same rules as the CLI (``AGENT_OS_CONFIG`` env var, then
+    walking up from cwd). If found, the Config is built from the TOML so
+    programmatic callers see the same ``company_root`` and other settings
+    the CLI does — without that, a caller running from any cwd would land
+    a default Config with ``company_root="."`` and quietly write to the
+    wrong tree.
+
+    Falls back to a default ``Config()`` when no TOML is discovered. To
+    bypass discovery entirely (e.g. in tests), call ``configure(Config())``
+    before the first ``get_config()`` call.
+    """
     global _config
     if _config is None:
-        _config = Config()
+        toml_path = Config.discover_toml()
+        if toml_path is not None:
+            _config = Config.from_toml(toml_path)
+        else:
+            _config = Config()
     return _config
 
 

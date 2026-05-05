@@ -1,7 +1,7 @@
 """Tests for agent_os.budget — circuit breaker and cost aggregation."""
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agent_os.budget import (
     check_agent_budget,
@@ -178,3 +178,70 @@ class TestFormatBudgetReport:
 
         report = format_budget_report(config=cfg)
         assert "TRIPPED" in report
+
+
+class TestBudgetSingleSourceOfTruth:
+    """Budget totals must always derive from cost JSONL — no secondary counters."""
+
+    def test_check_budget_reflects_jsonl_additions(self, aios_config):
+        """check_budget() must reflect new JSONL entries written after a prior call."""
+        cfg = Config(
+            company_root=aios_config.company_root,
+            daily_budget_cap_usd=100.0,
+            weekly_budget_cap_usd=500.0,
+            monthly_budget_cap_usd=2000.0,
+        )
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+        # First check — no spend
+        status1 = check_budget(config=cfg)
+        assert status1.daily_spent == 0.0
+
+        # Write cost entry
+        _write_cost_entry(cfg, today, "agent-001", 7.50)
+
+        # Second check — must reflect the new entry
+        status2 = check_budget(config=cfg)
+        assert status2.daily_spent == 7.50
+
+        # Write another entry
+        _write_cost_entry(cfg, today, "agent-003", 2.50)
+
+        # Third check — cumulative
+        status3 = check_budget(config=cfg)
+        assert status3.daily_spent == 10.0
+
+    def test_circuit_breaker_reconciles_against_jsonl(self, aios_config):
+        """Circuit breaker trips based on live JSONL totals, not a cached counter."""
+        cfg = Config(
+            company_root=aios_config.company_root,
+            daily_budget_cap_usd=10.0,
+            weekly_budget_cap_usd=500.0,
+            monthly_budget_cap_usd=2000.0,
+        )
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+        # Under cap
+        _write_cost_entry(cfg, today, "agent-001", 5.0)
+        assert not check_budget(config=cfg).circuit_breaker_tripped
+
+        # Push over cap
+        _write_cost_entry(cfg, today, "agent-001", 6.0)
+        assert check_budget(config=cfg).circuit_breaker_tripped
+
+    def test_weekly_cap_derived_from_jsonl(self, aios_config):
+        """Weekly cap checks must sum across multiple JSONL date files."""
+        cfg = Config(
+            company_root=aios_config.company_root,
+            daily_budget_cap_usd=100.0,
+            weekly_budget_cap_usd=20.0,
+            monthly_budget_cap_usd=2000.0,
+        )
+        today = datetime.now(UTC)
+        for i in range(3):
+            date_str = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            _write_cost_entry(cfg, date_str, "agent-001", 8.0)
+
+        status = check_budget(config=cfg)
+        assert status.weekly_spent == 24.0
+        assert status.circuit_breaker_tripped  # 24 >= 20

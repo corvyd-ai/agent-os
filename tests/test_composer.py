@@ -1,8 +1,9 @@
-"""Tests for PromptComposer — template chain loading and feedback routing."""
+"""Tests for PromptComposer — template chain loading, feedback routing, and failure injection."""
 
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent_os.composer import PromptComposer
 from agent_os.config import Config
@@ -180,3 +181,121 @@ class TestFeedbackRouting:
         composer = PromptComposer(config=cfg)
         sections = dict(composer.get_sections(strategist))
         assert "system_notes" not in sections
+
+
+class TestFailureInjection:
+    """Failed tasks appear in the right agents' system prompts."""
+
+    @staticmethod
+    def _make_failed_task(failed_dir, task_id, title, assigned_to, reason="Something broke"):
+        """Write a minimal failed-task file to the failed/ directory."""
+        meta = {
+            "id": task_id,
+            "title": title,
+            "assigned_to": assigned_to,
+            "status": "failed",
+            "outcome": "failure",
+            "created_at": "2026-05-03T10:00:00-07:00",
+        }
+        body = f"Task body for {task_id}.\n\n## Failure\n\n**Date**: 2026-05-03T12:00:00-07:00\n**Reason**: {reason}\n"
+        content = f"---\n{yaml.dump(meta, default_flow_style=False, sort_keys=False)}---\n\n{body}"
+        (failed_dir / f"{task_id}.md").write_text(content)
+
+    def test_agent_sees_own_failures(self, company_root, agent_config):
+        """A builder agent sees its own recent failures."""
+        failed_dir = company_root / "agents" / "tasks" / "failed"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        self._make_failed_task(failed_dir, "task-2026-0503-001", "Fix the widget", "agent-001-builder", "Build failed")
+
+        cfg = Config(company_root=company_root)
+        composer = PromptComposer(config=cfg)
+        sections = dict(composer.get_sections(agent_config))
+
+        assert "recent_failures" in sections
+        content = sections["recent_failures"]
+        assert "task-2026-0503-001" in content
+        assert "Fix the widget" in content
+        assert "Build failed" in content
+        assert "2026-05-03T12:00:00-07:00" in content
+        # Should NOT contain the all-agents header
+        assert "All Agents" not in content
+
+    def test_agent_does_not_see_other_agents_failures(self, company_root, agent_config):
+        """An agent does not see failures assigned to other agents."""
+        failed_dir = company_root / "agents" / "tasks" / "failed"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        self._make_failed_task(failed_dir, "task-2026-0503-002", "Deploy infra", "agent-003-operator", "SSH timeout")
+
+        cfg = Config(company_root=company_root)
+        composer = PromptComposer(config=cfg)
+        sections = dict(composer.get_sections(agent_config))
+
+        assert "recent_failures" not in sections
+
+    def test_steward_sees_all_agent_failures(self, company_root):
+        """The Steward sees failures from all agents (governance data)."""
+        steward = AgentConfig(
+            agent_id="agent-000-steward",
+            name="Steward",
+            role="Board Secretary / Human Interface",
+            model="claude-sonnet-4-6",
+            allowed_tools=["Read"],
+            registry_path=Path("/tmp/f.md"),
+            system_body="I govern.",
+        )
+
+        failed_dir = company_root / "agents" / "tasks" / "failed"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        self._make_failed_task(failed_dir, "task-2026-0503-010", "Build dashboard", "agent-001-builder", "Test failure")
+        self._make_failed_task(
+            failed_dir, "task-2026-0503-011", "Update DNS", "agent-003-operator", "Permission denied"
+        )
+
+        cfg = Config(company_root=company_root)
+        composer = PromptComposer(config=cfg)
+        sections = dict(composer.get_sections(steward))
+
+        assert "recent_failures" in sections
+        content = sections["recent_failures"]
+        # All-agents header
+        assert "All Agents" in content
+        # Both tasks visible
+        assert "task-2026-0503-010" in content
+        assert "task-2026-0503-011" in content
+        # Agent attribution present in Steward view
+        assert "agent-001-builder" in content
+        assert "agent-003-operator" in content
+        # Reasons present
+        assert "Test failure" in content
+        assert "Permission denied" in content
+
+    def test_no_failures_no_section(self, company_root, agent_config):
+        """When there are no failed tasks, the section is omitted."""
+        # Ensure the failed dir exists but is empty
+        failed_dir = company_root / "agents" / "tasks" / "failed"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+
+        cfg = Config(company_root=company_root)
+        composer = PromptComposer(config=cfg)
+        sections = dict(composer.get_sections(agent_config))
+
+        assert "recent_failures" not in sections
+
+    def test_failure_summary_is_concise(self, company_root, agent_config):
+        """Summary includes task ID, title, reason, and timestamp — nothing more."""
+        failed_dir = company_root / "agents" / "tasks" / "failed"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        self._make_failed_task(failed_dir, "task-2026-0503-005", "Run tests", "agent-001-builder", "pytest exit code 1")
+
+        cfg = Config(company_root=company_root)
+        composer = PromptComposer(config=cfg)
+        sections = dict(composer.get_sections(agent_config))
+        content = sections["recent_failures"]
+
+        # Must contain the four required fields
+        assert "task-2026-0503-005" in content  # task ID
+        assert "Run tests" in content  # title
+        assert "pytest exit code 1" in content  # reason
+        assert "2026-05-03" in content  # timestamp
+        # Must NOT contain the full task body
+        assert "Task body for" not in content

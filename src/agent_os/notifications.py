@@ -57,6 +57,8 @@ KNOWN_EVENT_TYPES: dict[str, str] = {
     "watchdog_alert": "A scheduled agent hasn't run within its expected interval.",
     "daily_digest": "Daily system health summary.",
     "message_for_human": "An agent sent a message to the human inbox.",
+    "cycle_outcome": "Structured event emitted when a task cycle ends, separating process status from artifact status.",
+    "dispatch_skipped": "Emitted when the scheduler evaluates an agent and decides not to fire (with reason).",
 }
 
 

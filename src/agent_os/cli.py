@@ -420,6 +420,14 @@ def cmd_schedule(args):
     print(get_schedule_status())
 
 
+def cmd_dispatch_status(args):
+    """Show per-agent dispatch status — one-glance view of scheduler activity."""
+    _set_root(args)
+    from .events import format_dispatch_status
+
+    print(format_dispatch_status())
+
+
 # --- budget command ---
 
 
@@ -458,6 +466,13 @@ def cmd_backlog(args):
         else:
             print(f"Error: {args.task_id} not found in backlog/")
             sys.exit(1)
+    elif action == "demote":
+        result = aios.demote_task(args.task_id)
+        if result:
+            print(f"Demoted {args.task_id} back to backlog/ at {result}")
+        else:
+            print(f"Error: {args.task_id} not found in queued/")
+            sys.exit(1)
     else:
         # List backlog
         items = aios.list_backlog()
@@ -492,28 +507,84 @@ def cmd_archive(args):
 # --- update command ---
 
 
+def _is_agent_os_repo(path: Path) -> bool:
+    """Check whether *path* looks like the agent-os source repo.
+
+    We look for the canonical ``src/agent_os/__init__.py`` — this file
+    exists in every agent-os checkout and is specific enough to avoid
+    false positives on unrelated repos (e.g. a company autocommit repo
+    that happens to sit higher in the filesystem).
+    """
+    return (path / "src" / "agent_os" / "__init__.py").is_file()
+
+
 def _find_repo_root() -> Path:
-    """Find the git repo root for the installed agent-os package."""
+    """Find the git repo root for the installed agent-os package.
+
+    Walks up from the installed package directory looking for a ``.git``
+    directory.  When one is found, it is **validated**: the repo must
+    contain ``src/agent_os/__init__.py`` — the hallmark of an agent-os
+    source checkout.  Repos that fail the check are skipped, and the
+    walk continues upward.
+
+    Returns ``None`` when no validated agent-os repo is found (typical
+    for wheel installs where the venv sits under an unrelated git repo).
+    """
     pkg_dir = Path(__file__).resolve().parent
     # Walk up from the package directory to find the .git root
     current = pkg_dir
     while current != current.parent:
-        if (current / ".git").exists():
+        if (current / ".git").exists() and _is_agent_os_repo(current):
             return current
         current = current.parent
     return None
 
 
-def cmd_update(args):
-    """Self-update agent-os from its git repository."""
-    import subprocess
+def _resolve_repo_root(args, *, context: str = "update") -> Path | None:
+    """Resolve the agent-os repo root, honouring ``--repo`` if given.
 
-    repo_root = _find_repo_root()
-    if repo_root is None:
-        print("Error: agent-os is not installed from a git repository.", file=sys.stderr)
-        print("Install from git to use self-update:", file=sys.stderr)
-        print("  git clone https://github.com/corvyd-ai/agent-os && cd agent-os && pip install -e .", file=sys.stderr)
-        sys.exit(1)
+    *context* is used in error messages (e.g. "update", "project backfill").
+    Returns ``None`` when no repo could be found (wheel-install scenario).
+    Exits with a clear error if ``--repo`` was explicitly given but is invalid.
+    """
+    explicit = getattr(args, "repo", None)
+    if explicit is not None:
+        repo = Path(explicit).resolve()
+        if not (repo / ".git").exists():
+            print(
+                f"Error: --repo {explicit} does not contain a .git directory.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not _is_agent_os_repo(repo):
+            print(
+                f"Error: --repo {explicit} does not look like an agent-os source repo "
+                f"(missing src/agent_os/__init__.py).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return repo
+    return _find_repo_root()
+
+
+def cmd_update(args):
+    """Self-update agent-os.
+
+    Dispatches on installation mode: a git checkout (editable install)
+    pulls and reinstalls; a wheel install fetches the latest GitHub
+    release and reinstalls. Both end by firing release notes so agents
+    running on this deployment learn what changed.
+    """
+    repo_root = _resolve_repo_root(args, context="update")
+    if repo_root is not None:
+        _update_from_git(args, repo_root)
+    else:
+        _update_from_wheel(args)
+
+
+def _update_from_git(args, repo_root: Path) -> None:
+    """Self-update from a local git checkout (editable install)."""
+    import subprocess
 
     def git(*cmd):
         result = subprocess.run(
@@ -621,6 +692,228 @@ def cmd_update(args):
         previous_version=previous_version,
         new_version=new_version,
     )
+
+
+def _update_from_wheel(args) -> None:
+    """Self-update from a published GitHub Release wheel.
+
+    Used when agent-os is installed from a built wheel (the production
+    deployment path) and there's no local git checkout to pull from.
+    Resolves the release source from --source > [update].source >
+    upstream default, fetches the release JSON via the public GitHub
+    API (no auth needed for public repos), downloads the .whl asset,
+    and `pip install --upgrade`s it. Then fires release notes.
+
+    Errors are surfaced — a network failure or missing asset must NOT
+    silently no-op, since the whole point of this path is to keep
+    production deployments current.
+    """
+    import json
+    import subprocess
+    import tempfile
+    import urllib.error
+    import urllib.request
+
+    from . import __version__ as previous_version
+
+    source = _resolve_update_source(args)
+    owner_repo, _, tag = source.partition("@")
+    if not owner_repo:
+        print(f"Error: invalid update source '{source}'. Expected 'owner/repo@tag'.", file=sys.stderr)
+        sys.exit(1)
+    tag = tag or "latest"
+
+    api_url = f"https://api.github.com/repos/{owner_repo}/releases/tags/{tag}"
+    print(f"Fetching {owner_repo}@{tag} release info...")
+
+    try:
+        req = urllib.request.Request(
+            api_url,
+            headers={
+                "User-Agent": "agent-os-update",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        print(f"Error: GitHub API returned {e.code} {e.reason} for {api_url}", file=sys.stderr)
+        sys.exit(1)
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        print(f"Error: could not fetch release info from {api_url}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    wheel_assets = [a for a in data.get("assets", []) if a.get("name", "").endswith(".whl")]
+    if not wheel_assets:
+        print(f"Error: release {owner_repo}@{tag} has no .whl asset to install.", file=sys.stderr)
+        sys.exit(1)
+
+    asset = wheel_assets[0]
+    wheel_url = asset["browser_download_url"]
+    wheel_name = asset["name"]
+    new_version_from_wheel = _parse_wheel_version(wheel_name)
+
+    if new_version_from_wheel and new_version_from_wheel == previous_version:
+        print(f"Already up to date (v{previous_version}).")
+        return
+
+    print()
+    print(f"Current: v{previous_version}")
+    print(f"Latest:  v{new_version_from_wheel or '?'}  ({wheel_name})")
+    body = (data.get("body") or "").strip()
+    if body:
+        print()
+        print("Release notes from GitHub:")
+        print("─" * 40)
+        print(body)
+        print("─" * 40)
+    print()
+
+    if not getattr(args, "yes", False):
+        try:
+            answer = input("Apply update? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+        if answer and answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    # Download wheel to a temp file, install, then clean up
+    print(f"\nDownloading {wheel_name}...")
+    with tempfile.NamedTemporaryFile(suffix=".whl", delete=False) as tmp:
+        wheel_path = Path(tmp.name)
+    try:
+        try:
+            req = urllib.request.Request(wheel_url, headers={"User-Agent": "agent-os-update"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                wheel_path.write_bytes(resp.read())
+        except (urllib.error.URLError, OSError) as e:
+            print(f"Error: download failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Installing {wheel_name}...")
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--force-reinstall",
+                "--no-deps",
+                str(wheel_path),
+                "--quiet",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            print(f"Error: pip install failed: {r.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+    finally:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            wheel_path.unlink()
+
+    # Re-read installed version from a subprocess so we see the new code
+    r = subprocess.run(
+        [sys.executable, "-c", "from agent_os import __version__; print(__version__)"],
+        capture_output=True,
+        text=True,
+    )
+    new_version = r.stdout.strip() if r.returncode == 0 else (new_version_from_wheel or "unknown")
+    print(f"\nUpdated to v{new_version}.")
+
+    # Translate the GitHub release body into "commit_subjects" the release-notes
+    # mechanism can render. Markdown bullet lines become individual subjects;
+    # otherwise the body becomes a single-blob entry. This means the agent-visible
+    # broadcast/changelog mirrors what humans see on the release page.
+    commit_subjects = _extract_subjects_from_release_body(body)
+    new_commit = _extract_commit_sha_from_release_body(body)
+
+    _write_release_notes_if_possible(
+        previous_commit="",
+        new_commit=new_commit,
+        commit_subjects=commit_subjects,
+        previous_version=previous_version,
+        new_version=new_version,
+    )
+
+
+def _resolve_update_source(args) -> str:
+    """Resolve the update source spec ('owner/repo@tag').
+
+    Resolution order: --source flag > [update].source in agent-os.toml >
+    Config default ('corvyd-ai/agent-os@latest').
+
+    `agent-os update` does not run `_set_root()` (it operates on the
+    platform package, not a company tree), so we discover and load the
+    TOML directly here for the [update].source lookup.
+    """
+    cli_source = getattr(args, "source", None)
+    if cli_source:
+        return cli_source
+
+    try:
+        from .config import Config
+
+        toml_path = Config.discover_toml()
+        if toml_path is not None:
+            cfg = Config.from_toml(toml_path)
+            return cfg.update_source
+    except (OSError, ValueError):
+        pass
+
+    from .config import Config
+
+    return Config().update_source
+
+
+def _parse_wheel_version(wheel_name: str) -> str:
+    """Extract the version segment from a wheel filename per PEP 491.
+
+    `agent_os-0.3.0-py3-none-any.whl` → `0.3.0`
+    `agent_os-0.3.0.dev5+g1234567-py3-none-any.whl` → `0.3.0.dev5+g1234567`
+    Returns '' if the filename doesn't have at least two `-`-separated parts.
+    """
+    parts = wheel_name.split("-")
+    if len(parts) >= 2:
+        return parts[1]
+    return ""
+
+
+def _extract_subjects_from_release_body(body: str) -> list[str]:
+    """Pull bullet items out of a GitHub release body for the release-notes broadcast.
+
+    If the body has markdown bullet lines, those become individual entries
+    (the broadcast/changelog renders them as a list). Otherwise the body
+    falls through as a single entry — better than nothing, since wheel
+    updates can't read per-commit subjects from local git.
+    """
+    if not body:
+        return []
+    bullets = [line.lstrip("-* \t").rstrip() for line in body.splitlines() if line.lstrip().startswith(("-", "*"))]
+    bullets = [b for b in bullets if b]
+    if bullets:
+        return bullets
+    first_line = body.splitlines()[0].strip()
+    return [first_line] if first_line else []
+
+
+def _extract_commit_sha_from_release_body(body: str) -> str:
+    """Pull a 'Commit: <sha>' line out of a GitHub release body, if present.
+
+    CI publishes the source commit in each release body as
+    `Commit: <full-sha>`. Returns '' if not found.
+    """
+    import re
+
+    if not body:
+        return ""
+    m = re.search(r"\bCommit:\s*([0-9a-f]{7,40})\b", body)
+    return m.group(1) if m else ""
 
 
 def _write_release_notes_if_possible(
@@ -747,6 +1040,51 @@ def cmd_doctor(args):
     sys.exit(1 if result.errors else 0)
 
 
+# --- audit command ---
+
+
+def cmd_audit(args):
+    """Cross-reference filesystem state against primary sources."""
+    _set_root(args)
+    from .audit import format_audit_json, format_audit_report, run_audit
+    from .config import get_config
+
+    cfg = get_config()
+
+    # Determine which checks to run
+    checks = []
+    if getattr(args, "all", False):
+        checks = None  # run_audit defaults to all
+    else:
+        if getattr(args, "check_prs", False):
+            checks.append("prs")
+        if getattr(args, "check_budget", False):
+            checks.append("budget")
+        if getattr(args, "check_dispatch", False):
+            checks.append("dispatch")
+        if getattr(args, "check_freshness", False):
+            checks.append("freshness")
+        if getattr(args, "check_worktrees", False):
+            checks.append("worktrees")
+        if getattr(args, "check_stale_tasks", False):
+            checks.append("stale_tasks")
+
+    # If nothing selected, default to all
+    if not checks:
+        checks = None
+
+    stale_hours = getattr(args, "stale_hours", 6.0)
+    report = run_audit(config=cfg, checks=checks, stale_task_hours=stale_hours)
+
+    if getattr(args, "json", False):
+        print(format_audit_json(report))
+    else:
+        no_color = getattr(args, "no_color", False)
+        print(format_audit_report(report, no_color=no_color))
+
+    sys.exit(1 if report.fail_count else 0)
+
+
 # --- digest command ---
 
 
@@ -755,7 +1093,15 @@ def cmd_digest(args):
     _set_root(args)
     from .maintenance import run_daily_digest
 
-    result = run_daily_digest()
+    window = getattr(args, "window", "today")
+    result = run_daily_digest(window=window)
+
+    if result.window == "yesterday":
+        window_note = f" (yesterday, {result.report_date})"
+    else:
+        window_note = f" (today, {result.report_date})"
+
+    print(f"Digest{window_note}")
     print(f"Tasks: {result.tasks_completed} completed, {result.tasks_failed} failed, {result.tasks_created} created")
     print(f"Agents: {result.agents_healthy} healthy, {result.agents_stale} stale")
     if result.breakers_tripped:
@@ -941,13 +1287,16 @@ def cmd_project_backfill(args):
     from .config import get_config
     from .release_notes import build_backfill_entries, write_backfill_notes
 
-    repo_root = _find_repo_root()
+    repo_root = _resolve_repo_root(args, context="project backfill")
     if repo_root is None:
         print(
-            "Error: agent-os is not installed from a git repository — can't read history to backfill.",
+            "Error: could not find an agent-os source repository.",
             file=sys.stderr,
         )
-        print("Install from git if you want to use backfill.", file=sys.stderr)
+        print(
+            "Hint: use --repo /path/to/agent-os to point at a local clone, or install agent-os from a git checkout.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     since = getattr(args, "since", None)
@@ -1772,6 +2121,7 @@ Common commands, grouped by intent:
     messages <ch>     Broadcasts, threads, human inbox, agent inbox
     strategy <topic>  Drives, decisions, or proposals
     timeline          Merged activity log for a day
+    dispatch-status   Per-agent dispatch state (cadence, last/next)
 
   Run an agent
     cycle <agent>             One work cycle (tasks, messages, threads)
@@ -1786,7 +2136,7 @@ Common commands, grouped by intent:
     budget-set         Update daily / weekly / monthly caps
     autonomy           Set per-agent autonomy level
     schedule-toggle    Flip scheduler features on/off
-    backlog {promote,reject}  Move tasks out of backlog
+    backlog {promote,reject,demote}  Manage backlog and queued tasks
 
   Create
     init <name>   Create a new company filesystem
@@ -1895,6 +2245,11 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common_args(p_sched)
     p_sched.set_defaults(func=cmd_schedule)
 
+    # dispatch-status
+    p_ds = subparsers.add_parser("dispatch-status", help="Show per-agent dispatch status")
+    _add_config_args(p_ds)
+    p_ds.set_defaults(func=cmd_dispatch_status)
+
     # budget
     p_budget = subparsers.add_parser("budget", help="Show budget status")
     _add_common_args(p_budget)
@@ -1911,6 +2266,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_bl_reject = backlog_sub.add_parser("reject", help="Reject backlog item")
     p_bl_reject.add_argument("task_id", help="Task ID to reject")
     p_bl_reject.add_argument("--reason", default=None, help="Rejection reason")
+
+    p_bl_demote = backlog_sub.add_parser("demote", help="Move task from queued back to backlog")
+    p_bl_demote.add_argument("task_id", help="Task ID to demote")
 
     p_backlog.set_defaults(func=cmd_backlog)
 
@@ -1941,8 +2299,38 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common_args(p_doctor)
     p_doctor.set_defaults(func=cmd_doctor)
 
+    # audit — cross-reference filesystem state against primary sources
+    p_audit = subparsers.add_parser("audit", help="Cross-reference filesystem state against primary sources")
+    p_audit.add_argument("--check-prs", action="store_true", help="Verify done tasks have matching GitHub PRs")
+    p_audit.add_argument("--check-budget", action="store_true", help="Compare cost JSONL against scheduler state")
+    p_audit.add_argument("--check-dispatch", action="store_true", help="Show last dispatch time per agent")
+    p_audit.add_argument("--check-freshness", action="store_true", help="Check agent working-memory freshness")
+    p_audit.add_argument("--check-worktrees", action="store_true", help="Find dead worktrees with no active task")
+    p_audit.add_argument("--check-stale-tasks", action="store_true", help="Find stuck in-progress tasks")
+    p_audit.add_argument("--all", action="store_true", help="Run all checks")
+    p_audit.add_argument("--json", action="store_true", help="Output as JSON")
+    p_audit.add_argument("--no-color", action="store_true", help="Disable color output")
+    p_audit.add_argument(
+        "--stale-hours",
+        type=float,
+        default=6.0,
+        help="Hours before an in-progress task is considered stale (default: 6)",
+    )
+    _add_config_args(p_audit)
+    p_audit.set_defaults(func=cmd_audit)
+
     # digest
     p_digest = subparsers.add_parser("digest", help="Generate health digest")
+    p_digest.add_argument(
+        "--window",
+        choices=["yesterday", "today"],
+        default="today",
+        help=(
+            "Which day to report on. 'yesterday' reports the prior calendar "
+            "day (used by the cron-driven morning briefing). 'today' reports "
+            "today since midnight (default for interactive CLI use)."
+        ),
+    )
     _add_common_args(p_digest)
     p_digest.set_defaults(func=cmd_digest)
 
@@ -1980,13 +2368,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip posting the 'release notes enabled' broadcast",
     )
     p_project_backfill.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    p_project_backfill.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "Path to a local agent-os git clone. Overrides automatic discovery. "
+            "Use when the package is installed in a venv under an unrelated git repo."
+        ),
+    )
     _add_common_args(p_project_backfill)
 
     p_project.set_defaults(func=cmd_project)
 
     # update
-    p_update = subparsers.add_parser("update", help="Self-update agent-os from git")
+    p_update = subparsers.add_parser(
+        "update",
+        help="Self-update agent-os (git checkout: pull+reinstall; wheel install: fetch latest GitHub release)",
+    )
     p_update.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    p_update.add_argument(
+        "--source",
+        default=None,
+        help=(
+            "GitHub release source for wheel installs, format 'owner/repo@tag'. "
+            "Overrides [update].source in agent-os.toml. "
+            "Default: corvyd-ai/agent-os@latest. Ignored for git-checkout installs."
+        ),
+    )
+    p_update.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "Path to a local agent-os git clone. Overrides automatic discovery. "
+            "Use when the package is installed in a venv under an unrelated git repo."
+        ),
+    )
     p_update.set_defaults(func=cmd_update)
 
     # cron

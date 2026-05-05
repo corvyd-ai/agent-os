@@ -19,6 +19,12 @@ from pathlib import Path
 
 from .config import Config, get_config
 
+# Log directories that are not real agents and should be silently
+# skipped by the watchdog and anomaly detection.  "system" holds
+# platform-emitted logs; "human" holds human-initiated actions logged
+# via dashboard/CLI.
+WATCHDOG_SKIP_DIRS: frozenset[str] = frozenset({"system", "human"})
+
 
 @dataclass
 class ArchiveResult:
@@ -217,7 +223,7 @@ def run_watchdog(*, config: Config | None = None) -> WatchdogResult:
         if not agent_dir.is_dir():
             continue
         agent_id = agent_dir.name
-        if agent_id == "system":
+        if agent_id in WATCHDOG_SKIP_DIRS:
             continue
 
         result.agents_checked += 1
@@ -306,24 +312,53 @@ class DigestResult:
     daily_cap: float = 0.0
     anomalies: list[str] = field(default_factory=list)
     digest_path: str = ""
+    window: str = "yesterday"
+    report_date: str = ""
 
 
-def run_daily_digest(*, config: Config | None = None) -> DigestResult:
+def run_daily_digest(*, window: str = "yesterday", config: Config | None = None) -> DigestResult:
     """Compute daily health summary from logs, costs, and task state.
 
     Writes a markdown digest to ``operations/digests/YYYY-MM-DD.md``
     and sends it via the notification system.
+
+    Parameters
+    ----------
+    window:
+        Which calendar day to report on:
+
+        - ``"yesterday"`` — the previous calendar day's totals.  This is
+          the default and the right choice for cron-driven morning
+          briefings: it answers *"what did the company do yesterday?"*
+        - ``"today"`` — today since midnight.  Useful for interactive
+          "how's today going so far?" checks.
+
+    config:
+        Explicit Config; falls back to ``get_config()`` when *None*.
     """
+    if window not in ("yesterday", "today"):
+        raise ValueError(f"Invalid window {window!r}; expected 'yesterday' or 'today'")
+
     cfg = config or get_config()
     result = DigestResult()
-    today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
+    result.window = window
 
-    # --- Task counts from today's files ---
-    result.tasks_completed = _count_dir_modified_today(cfg.tasks_dir / "done", today, cfg)
-    result.tasks_failed = _count_dir_modified_today(cfg.tasks_dir / "failed", today, cfg)
-    result.tasks_created = _count_dir_modified_today(cfg.tasks_dir / "queued", today, cfg) + _count_dir_modified_today(
-        cfg.tasks_dir / "backlog", today, cfg
-    )
+    now = datetime.now(cfg.tz)
+    if window == "yesterday":
+        from datetime import timedelta
+
+        report_dt = now - timedelta(days=1)
+    else:
+        report_dt = now
+    report_date = report_dt.strftime("%Y-%m-%d")
+    result.report_date = report_date
+
+    # --- Task counts for the report date ---
+    result.tasks_completed = _count_dir_modified_on_date(cfg.tasks_dir / "done", report_date, cfg)
+    result.tasks_failed = _count_dir_modified_on_date(cfg.tasks_dir / "failed", report_date, cfg)
+    result.tasks_created = _count_dir_modified_on_date(
+        cfg.tasks_dir / "queued", report_date, cfg
+    ) + _count_dir_modified_on_date(cfg.tasks_dir / "backlog", report_date, cfg)
 
     # --- Agent health (reuse watchdog logic) ---
     watchdog = run_watchdog(config=cfg)
@@ -339,23 +374,33 @@ def run_daily_digest(*, config: Config | None = None) -> DigestResult:
         if state.tripped:
             result.breakers_tripped.append(agent.agent_id)
 
-    # --- Budget ---
-    from .budget import check_budget
+    # --- Budget for the report date ---
+    # NOTE: budget.daily_spent (from check_budget) is always "today since
+    # midnight" — that's correct for the interactive `agent-os budget`
+    # command.  The digest uses get_daily_costs() with the report date so
+    # that a morning briefing shows yesterday's actual spend, not a
+    # near-zero midnight-to-now figure.
+    from .budget import get_daily_costs
 
-    budget = check_budget(config=cfg)
-    result.daily_spend = budget.daily_spent
-    result.daily_cap = budget.daily_cap
+    result.daily_spend = get_daily_costs(report_date, config=cfg)
+    result.daily_cap = cfg.daily_budget_cap_usd
 
     # --- Anomaly detection ---
-    result.anomalies = _detect_anomalies(cfg, today)
+    result.anomalies = _detect_anomalies(cfg, report_date)
 
     # --- Write digest file ---
     digest_dir = cfg.operations_dir / "digests"
     digest_dir.mkdir(parents=True, exist_ok=True)
-    digest_path = digest_dir / f"{today}.md"
+    digest_path = digest_dir / f"{report_date}.md"
+
+    if window == "yesterday":
+        window_label = f"{report_date} (yesterday)"
+    else:
+        window_label = f"{report_date} (today, since midnight)"
 
     lines = [
-        f"# Daily Digest — {today}",
+        f"# Daily Digest — {report_date}",
+        f"*Window: {window_label}*",
         "",
         "## Tasks",
         f"- Completed: {result.tasks_completed}",
@@ -400,13 +445,15 @@ def run_daily_digest(*, config: Config | None = None) -> DigestResult:
         NotificationEvent(
             event_type="daily_digest",
             severity="info",
-            title=f"Daily digest — {today}",
+            title=f"Daily digest — {report_date}",
             detail="\n".join(summary_parts),
             refs={
                 "tasks_completed": result.tasks_completed,
                 "tasks_failed": result.tasks_failed,
                 "agents_healthy": result.agents_healthy,
                 "agents_stale": result.agents_stale,
+                "window": window,
+                "report_date": report_date,
             },
         ),
         config=cfg,
@@ -415,29 +462,33 @@ def run_daily_digest(*, config: Config | None = None) -> DigestResult:
     return result
 
 
-def _count_dir_modified_today(directory: Path, today: str, cfg: Config) -> int:
-    """Count files in a directory modified today (by date in filename or mtime).
+def _count_dir_modified_on_date(directory: Path, target_date: str, cfg: Config) -> int:
+    """Count files in a directory modified on *target_date* (by filename or mtime).
 
-    Mtime is interpreted in ``cfg.tz`` to match how ``today`` was computed —
-    otherwise this flakes across midnight when local time and the configured
-    timezone disagree on the date.
+    Mtime is interpreted in ``cfg.tz`` to match how ``target_date`` was
+    computed — otherwise this flakes across midnight when local time and
+    the configured timezone disagree on the date.
     """
     if not directory.exists():
         return 0
     count = 0
     for f in directory.glob("*.md"):
-        # Check if filename contains today's date
-        if today.replace("-", "") in f.stem or today in f.stem:
+        # Check if filename contains the target date
+        if target_date.replace("-", "") in f.stem or target_date in f.stem:
             count += 1
             continue
         # Fall back to mtime, in the configured timezone
         try:
             mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=cfg.tz)
-            if mtime.strftime("%Y-%m-%d") == today:
+            if mtime.strftime("%Y-%m-%d") == target_date:
                 count += 1
         except OSError:
             continue
     return count
+
+
+# Keep the old name as an alias for backward compatibility
+_count_dir_modified_today = _count_dir_modified_on_date
 
 
 def _detect_anomalies(cfg: Config, today: str) -> list[str]:
@@ -448,7 +499,7 @@ def _detect_anomalies(cfg: Config, today: str) -> list[str]:
         return anomalies
 
     for agent_dir in sorted(cfg.logs_dir.iterdir()):
-        if not agent_dir.is_dir() or agent_dir.name == "system":
+        if not agent_dir.is_dir() or agent_dir.name in WATCHDOG_SKIP_DIRS:
             continue
 
         agent_id = agent_dir.name

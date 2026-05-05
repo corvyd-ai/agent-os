@@ -107,8 +107,9 @@ class PromptComposer:
         7. Inbox awareness
         8. Broadcasts (Layer 2)
         9. System notes (filtered by feedback_routing config)
-        10. Quality gates (builder agents only)
-        11. Task context (if present)
+        10. Recent task failures (own failures; all-agent view for Steward)
+        11. Quality gates (builder agents only)
+        12. Task context (if present)
         """
         cfg = self.config
         today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
@@ -234,7 +235,12 @@ class PromptComposer:
                     ),
                 )
 
-        # 10. Quality gates / workspace validation (builder agents only)
+        # 10. Recent task failures
+        failure_section = self._build_failure_section(agent_config, cfg)
+        if failure_section:
+            yield "recent_failures", failure_section
+
+        # 11. Quality gates / workspace validation (builder agents only)
         if self.should_include_section("quality_gates", agent_config):
             if workspace_branch and workspace_code_dir and cfg.project_validate_commands:
                 yield (
@@ -255,9 +261,72 @@ class PromptComposer:
                     ),
                 )
 
-        # 11. Task context
+        # 12. Task context
         if task_context:
             yield "task_context", (f"# Current Task\n\nYou have been assigned the following task:\n\n{task_context}")
+
+    # --- Failure injection helpers ---
+
+    _STEWARD_ID = "agent-000-steward"
+
+    def _build_failure_section(self, agent_config: AgentConfig, cfg: Config) -> str | None:
+        """Build the recent-failures prompt section.
+
+        - For the Steward: all recent failures across every agent.
+        - For other agents: only their own recent failures.
+
+        Returns ``None`` when there are no failures to show.
+        """
+        is_steward = agent_config.agent_id == self._STEWARD_ID
+
+        if is_steward:
+            failures = aios.get_recent_failures(config=cfg)
+        else:
+            failures = aios.get_recent_failures(agent_config.agent_id, config=cfg)
+
+        if not failures:
+            return None
+
+        lines: list[str] = []
+        for meta, body, _path in failures[:10]:
+            task_id = meta.get("id", "unknown")
+            title = meta.get("title", "Untitled")
+            assigned = meta.get("assigned_to", "unassigned")
+            reason = self._extract_failure_field(body, "Reason")
+            date = self._extract_failure_field(body, "Date") or meta.get("created_at", "?")
+
+            entry = f"- **{task_id}**: {title}"
+            if is_steward:
+                entry += f" (agent: {assigned})"
+            if reason:
+                entry += f"\n  Reason: {reason}"
+            entry += f"\n  Failed: {date}"
+            lines.append(entry)
+
+        if is_steward:
+            header = (
+                "# Recent Task Failures (All Agents)\n\n"
+                "The following tasks have recently failed across the company. "
+                "Review for patterns, systemic issues, or agents that need support.\n\n"
+            )
+        else:
+            header = (
+                "# Recent Task Failures\n\n"
+                "The following tasks assigned to you have recently failed. "
+                "Review before starting new work.\n\n"
+            )
+
+        return header + "\n".join(lines)
+
+    @staticmethod
+    def _extract_failure_field(body: str, field_name: str) -> str:
+        """Extract a ``**FieldName**: value`` line from a task's failure section."""
+        prefix = f"**{field_name}**:"
+        for line in body.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith(prefix):
+                return stripped[len(prefix) :].strip()
+        return ""
 
     def should_include_section(self, section_name: str, agent_config: AgentConfig) -> bool:
         """Determine if a conditional section should be included."""

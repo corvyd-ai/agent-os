@@ -57,6 +57,7 @@ from .budget import check_agent_budget, check_budget
 from .composer import PromptComposer
 from .config import Config, get_config
 from .errors import ClaudeErrorClassifier
+from .events import CycleOutcomeEvent, emit_cycle_outcome
 from .logger import get_logger
 from .registry import load_agent
 from .tools import AIOS_TOOL_NAMES, create_aios_tools_server
@@ -584,6 +585,17 @@ async def _run_agent_standard(
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e, stderr_text, task=task_id)
         log.error("sdk_error", error_detail, {**error_refs, "task": task_id})
         aios.fail_task(task_id, error_detail, error_refs=error_refs, config=cfg)
+        emit_cycle_outcome(
+            CycleOutcomeEvent(
+                task_id=task_id,
+                agent=agent_config.agent_id,
+                cycle_type="task",
+                process_status="error",
+                artifact_status="none",
+                failure_reason=error_detail[:500],
+            ),
+            config=cfg,
+        )
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)
@@ -592,6 +604,17 @@ async def _run_agent_standard(
         error_detail = f"Pre-flight error: {e}"
         log.error("preflight_error", error_detail, {"task": task_id})
         aios.fail_task(task_id, error_detail, config=cfg)
+        emit_cycle_outcome(
+            CycleOutcomeEvent(
+                task_id=task_id,
+                agent=agent_config.agent_id,
+                cycle_type="task",
+                process_status="error",
+                artifact_status="none",
+                failure_reason=error_detail[:500],
+            ),
+            config=cfg,
+        )
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)
@@ -622,6 +645,17 @@ async def _run_agent_standard(
                         log.info("quality_gates_passed", "All quality gates passed", {"task_id": task_id})
                         aios.complete_task(task_id, config=cfg)
                         log.info("completed_task", f"Completed {task_id}", {"task_id": task_id})
+                        emit_cycle_outcome(
+                            CycleOutcomeEvent(
+                                task_id=task_id,
+                                agent=agent_config.agent_id,
+                                cycle_type="task",
+                                process_status="completed",
+                                artifact_status="completed",
+                                artifact_type="task_completion",
+                            ),
+                            config=cfg,
+                        )
                     else:
                         log.error(
                             "quality_gates_failed",
@@ -629,6 +663,17 @@ async def _run_agent_standard(
                             {"task_id": task_id, "output": gate_output[:500]},
                         )
                         aios.fail_task(task_id, f"Quality gates failed:\n{gate_output[-1000:]}", config=cfg)
+                        emit_cycle_outcome(
+                            CycleOutcomeEvent(
+                                task_id=task_id,
+                                agent=agent_config.agent_id,
+                                cycle_type="task",
+                                process_status="completed",
+                                artifact_status="failed",
+                                failure_reason="Quality gates failed",
+                            ),
+                            config=cfg,
+                        )
                 else:
                     aios.complete_task(task_id, config=cfg)
                     log.info(
@@ -636,12 +681,45 @@ async def _run_agent_standard(
                         f"Completed {task_id} (quality gates: N/A)",
                         {"task_id": task_id},
                     )
+                    emit_cycle_outcome(
+                        CycleOutcomeEvent(
+                            task_id=task_id,
+                            agent=agent_config.agent_id,
+                            cycle_type="task",
+                            process_status="completed",
+                            artifact_status="completed",
+                            artifact_type="task_completion",
+                        ),
+                        config=cfg,
+                    )
             else:
                 aios.complete_task(task_id, config=cfg)
                 log.info("completed_task", f"Completed {task_id}", {"task_id": task_id})
+                emit_cycle_outcome(
+                    CycleOutcomeEvent(
+                        task_id=task_id,
+                        agent=agent_config.agent_id,
+                        cycle_type="task",
+                        process_status="completed",
+                        artifact_status="completed",
+                        artifact_type="task_completion",
+                    ),
+                    config=cfg,
+                )
         else:
             aios.fail_task(task_id, result_msg.result or "Agent returned error", config=cfg)
             log.error("task_failed", f"Task {task_id} moved to failed/", {"task_id": task_id})
+            emit_cycle_outcome(
+                CycleOutcomeEvent(
+                    task_id=task_id,
+                    agent=agent_config.agent_id,
+                    cycle_type="task",
+                    process_status="completed",
+                    artifact_status="failed",
+                    failure_reason=result_msg.result or "Agent returned error",
+                ),
+                config=cfg,
+            )
 
 
 async def _run_agent_with_workspace(
@@ -1027,6 +1105,17 @@ async def _run_agent_with_workspace(
                             {"task_id": task_id, "subtype": subtype},
                         )
                         _preserve_on_failure(f"agent error: {subtype or 'unknown'}")
+                        emit_cycle_outcome(
+                            CycleOutcomeEvent(
+                                task_id=task_id,
+                                agent=agent_config.agent_id,
+                                cycle_type="task",
+                                process_status="error",
+                                artifact_status="none",
+                                failure_reason=f"Agent error: {subtype or 'unknown'}",
+                            ),
+                            config=cfg,
+                        )
                         return
 
             # --- Validate ---
@@ -1057,6 +1146,17 @@ async def _run_agent_with_workspace(
             )
             log.error("workspace_validate_exhausted", "Validation retries exhausted", {"task_id": task_id})
             _preserve_on_failure(f"validation failed after {max_retries + 1} attempts")
+            emit_cycle_outcome(
+                CycleOutcomeEvent(
+                    task_id=task_id,
+                    agent=agent_config.agent_id,
+                    cycle_type="task",
+                    process_status="completed",
+                    artifact_status="failed",
+                    failure_reason=f"Validation failed after {max_retries + 1} attempts",
+                ),
+                config=cfg,
+            )
             return
 
         # --- Commit + Push ---
@@ -1068,6 +1168,17 @@ async def _run_agent_with_workspace(
             log.error("workspace_commit_failed", f"Commit failed: {e}", {"task_id": task_id})
             aios.fail_task(task_id, f"Commit failed: {e}", config=cfg)
             _preserve_on_failure(f"commit failed: {e}")
+            emit_cycle_outcome(
+                CycleOutcomeEvent(
+                    task_id=task_id,
+                    agent=agent_config.agent_id,
+                    cycle_type="task",
+                    process_status="completed",
+                    artifact_status="failed",
+                    failure_reason=f"git commit failed: {e}",
+                ),
+                config=cfg,
+            )
             from .circuit_breaker import evaluate_breaker
 
             evaluate_breaker(agent_config.agent_id, config=cfg)
@@ -1148,6 +1259,14 @@ async def _run_agent_with_workspace(
         else:
             log.info("workspace_no_changes", "No code changes to commit", {"task_id": task_id})
 
+        # --- Collect workspace artifact info for cycle outcome event ---
+        _ws_pr_url = None
+        _ws_push_ok = None
+        if sha:
+            _ws_push_ok = push_ok
+            if push_ok:
+                _ws_pr_url = pr_url if "pr_url" in dir() else None
+
         # --- Resolve task ---
         if max_turns_exhausted:
             # Work passed validation but the agent never signalled completion
@@ -1178,6 +1297,22 @@ async def _run_agent_with_workspace(
                 ),
                 config=cfg,
             )
+            emit_cycle_outcome(
+                CycleOutcomeEvent(
+                    task_id=task_id,
+                    agent=agent_config.agent_id,
+                    cycle_type="task",
+                    process_status="completed",
+                    artifact_status="completed",
+                    artifact_type="github_pr" if _ws_pr_url else "git_commit" if sha else "task_completion",
+                    artifact_ref=_ws_pr_url or sha,
+                    workspace_git_commit=sha,
+                    workspace_git_push=_ws_push_ok,
+                    workspace_pr_url=_ws_pr_url,
+                    failure_reason="max_turns_exhausted — submitted for review",
+                ),
+                config=cfg,
+            )
             archive_path, archive_events = archive_workspace(workspace, "in_review", config=cfg)
             if archive_path:
                 log.info(
@@ -1189,6 +1324,21 @@ async def _run_agent_with_workspace(
         else:
             aios.complete_task(task_id, config=cfg)
             log.info("completed_task", f"Completed {task_id}", {"task_id": task_id, "branch": workspace.branch})
+            emit_cycle_outcome(
+                CycleOutcomeEvent(
+                    task_id=task_id,
+                    agent=agent_config.agent_id,
+                    cycle_type="task",
+                    process_status="completed",
+                    artifact_status="completed",
+                    artifact_type="github_pr" if _ws_pr_url else "git_commit" if sha else "task_completion",
+                    artifact_ref=_ws_pr_url or sha,
+                    workspace_git_commit=sha,
+                    workspace_git_push=_ws_push_ok,
+                    workspace_pr_url=_ws_pr_url,
+                ),
+                config=cfg,
+            )
             archive_path, archive_events = archive_workspace(workspace, "completed", config=cfg)
             if archive_path:
                 log.info(
@@ -1202,6 +1352,17 @@ async def _run_agent_with_workspace(
         log.error("workspace_error", str(e), {"task_id": task_id})
         aios.fail_task(task_id, f"Workspace error: {e}", config=cfg)
         _preserve_on_failure(f"workspace error: {e}")
+        emit_cycle_outcome(
+            CycleOutcomeEvent(
+                task_id=task_id,
+                agent=agent_config.agent_id,
+                cycle_type="task",
+                process_status="error",
+                artifact_status="none",
+                failure_reason=f"Workspace error: {e}",
+            ),
+            config=cfg,
+        )
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)
@@ -1210,6 +1371,17 @@ async def _run_agent_with_workspace(
         log.error("sdk_error", error_detail, {"task_id": task_id})
         aios.fail_task(task_id, error_detail, config=cfg)
         _preserve_on_failure(f"SDK error: {error_detail[:200]}")
+        emit_cycle_outcome(
+            CycleOutcomeEvent(
+                task_id=task_id,
+                agent=agent_config.agent_id,
+                cycle_type="task",
+                process_status="error",
+                artifact_status="none",
+                failure_reason=error_detail[:500],
+            ),
+            config=cfg,
+        )
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)
@@ -1219,6 +1391,17 @@ async def _run_agent_with_workspace(
         log.error("workspace_task_error", error_detail, {"task_id": task_id})
         aios.fail_task(task_id, error_detail, config=cfg)
         _preserve_on_failure(f"workspace task error: {str(e)[:200]}")
+        emit_cycle_outcome(
+            CycleOutcomeEvent(
+                task_id=task_id,
+                agent=agent_config.agent_id,
+                cycle_type="task",
+                process_status="error",
+                artifact_status="none",
+                failure_reason=error_detail[:500],
+            ),
+            config=cfg,
+        )
         from .circuit_breaker import evaluate_breaker
 
         evaluate_breaker(agent_config.agent_id, config=cfg)

@@ -22,6 +22,7 @@ from datetime import datetime
 
 from .budget import check_budget
 from .config import Config, get_config
+from .events import DispatchSkippedEvent, emit_dispatch_skipped
 from .logger import get_logger
 from .registry import list_agents
 
@@ -156,26 +157,58 @@ def _is_weekend(*, config: Config | None = None) -> bool:
     return _now(config=config).weekday() >= 5
 
 
+def _record_dispatch_outcome(
+    agent_id: str,
+    type_: str,
+    outcome: str,
+    *,
+    started_at: datetime | None = None,
+    error: str = "",
+    config: Config | None = None,
+) -> None:
+    """Append a structured dispatch-outcome line to the agent's own log.
+
+    Closes the silent-skip class of bug: every scheduled dispatch attempt
+    against an agent leaves a primary-source record in the place agents
+    already look (``logs/<agent-id>/<date>.jsonl``). Emitted for ``success``,
+    ``error``, and ``locked`` outcomes — not for "not at staggered minute"
+    (that would be one line per agent per minute, all noise).
+    """
+    cfg = config or get_config()
+    refs: dict = {"type": type_, "outcome": outcome}
+    if started_at is not None:
+        duration_sec = (_now(config=cfg) - started_at).total_seconds()
+        refs["duration_sec"] = round(duration_sec, 2)
+    if error:
+        refs["error"] = error
+
+    detail = f"{type_} dispatch: {outcome}"
+    if error:
+        detail += f" — {error}"
+
+    log = get_logger(agent_id, config=cfg)
+    if outcome == "error":
+        log.error("dispatch_outcome", detail, refs)
+    else:
+        log.info("dispatch_outcome", detail, refs)
+
+
 def write_scheduler_state(result: TickResult, *, config: Config | None = None) -> None:
-    """Write scheduler state file for dashboard consumption."""
+    """Write scheduler state file for dashboard consumption.
+
+    Budget data is NOT snapshotted here — it is always derived live from
+    the cost JSONL files via ``check_budget()``.  This avoids a secondary
+    counter that can drift from the primary source.
+    """
     cfg = config or get_config()
     cfg.operations_dir.mkdir(parents=True, exist_ok=True)
 
     state = {
         "last_tick": result.timestamp,
         "enabled": result.enabled,
-        "budget": {},
         "dispatched": [],
         "skipped": result.skipped,
     }
-
-    if not result.budget_tripped:
-        budget = check_budget(config=cfg)
-        state["budget"] = {
-            "daily_spent": round(budget.daily_spent, 2),
-            "daily_cap": budget.daily_cap,
-            "circuit_breaker_tripped": budget.circuit_breaker_tripped,
-        }
 
     for d in result.dispatched:
         state["dispatched"].append(
@@ -248,8 +281,20 @@ async def tick(*, config: Config | None = None) -> TickResult:
     from . import runner
 
     # --- Cycles ---
+    # One agent per tick. The original design serialized N awaits inside a
+    # single tick window; with 5 agents doing LLM-backed cycles, the
+    # systemd oneshot timeout killed the tick before later agents ran.
+    # Now we dispatch the first due agent and break. The next tick (1 min
+    # later) picks up the next due agent. Cadence timestamps naturally
+    # self-stagger: after the first round, each agent's mark is offset by
+    # ~1 minute, so they never bunch up again.
     if outside_hours and "cycle" in _OPERATING_HOURS_GATED:
         result.skipped.append("cycles: outside operating hours")
+        for agent_id in cycle_agents:
+            emit_dispatch_skipped(
+                DispatchSkippedEvent(agent=agent_id, cycle_type="cycle", reason="outside_operating_hours"),
+                config=cfg,
+            )
     elif cfg.schedule_cycles_enabled:
         for agent_id in cycle_agents:
             cadence_name = "scheduler-cycle"
@@ -257,9 +302,11 @@ async def tick(*, config: Config | None = None) -> TickResult:
                 lock = acquire_lock(agent_id, "cycle", config=cfg)
                 if lock is None:
                     result.skipped.append(f"cycle:{agent_id} locked")
+                    _record_dispatch_outcome(agent_id, "cycle", "locked", config=cfg)
                     continue
 
                 record = DispatchRecord(type="cycle", agent=agent_id, at=now_iso)
+                started = _now(config=cfg)
                 try:
                     get_logger("system").info(
                         "tick_dispatch", f"Dispatching cycle for {agent_id}", {"type": "cycle", "agent": agent_id}
@@ -272,18 +319,32 @@ async def tick(*, config: Config | None = None) -> TickResult:
                         f"Completed cycle for {agent_id}",
                         {"type": "cycle", "agent": agent_id},
                     )
+                    _record_dispatch_outcome(agent_id, "cycle", "success", started_at=started, config=cfg)
                 except Exception as e:
                     record.result = f"error: {e}"
                     get_logger("system").error(
                         "dispatch_error", f"Error in cycle for {agent_id}: {e}", {"type": "cycle", "agent": agent_id}
                     )
+                    _record_dispatch_outcome(agent_id, "cycle", "error", started_at=started, error=str(e), config=cfg)
+                    # Mark cadence even on failure to prevent infinite retry
+                    # loops every tick and to avoid blocking agents behind
+                    # this one.  The cycle retries after the normal cadence
+                    # interval instead of hammering every minute.
+                    _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
                 finally:
                     lock.close()
                 result.dispatched.append(record)
+                break  # One agent per tick — prevents serialized timeout kills
 
     # --- Standing orders ---
+    # One agent per tick, same rationale as cycles above.
     if outside_hours and "standing_orders" in _OPERATING_HOURS_GATED:
         result.skipped.append("standing_orders: outside operating hours")
+        for agent_id in agent_ids:
+            emit_dispatch_skipped(
+                DispatchSkippedEvent(agent=agent_id, cycle_type="standing_orders", reason="outside_operating_hours"),
+                config=cfg,
+            )
     elif cfg.schedule_standing_orders_enabled:
         for agent_id in agent_ids:
             cadence_name = "scheduler-standing-orders"
@@ -291,9 +352,11 @@ async def tick(*, config: Config | None = None) -> TickResult:
                 lock = acquire_lock(agent_id, "standing-orders", config=cfg)
                 if lock is None:
                     result.skipped.append(f"standing_orders:{agent_id} locked")
+                    _record_dispatch_outcome(agent_id, "standing_orders", "locked", config=cfg)
                     continue
 
                 record = DispatchRecord(type="standing_orders", agent=agent_id, at=now_iso)
+                started = _now(config=cfg)
                 try:
                     get_logger("system").info(
                         "tick_dispatch",
@@ -308,12 +371,21 @@ async def tick(*, config: Config | None = None) -> TickResult:
                         f"Completed standing orders for {agent_id}",
                         {"type": "standing_orders", "agent": agent_id},
                     )
+                    _record_dispatch_outcome(agent_id, "standing_orders", "success", started_at=started, config=cfg)
                 except Exception as e:
                     record.result = f"error: {e}"
                     get_logger("system").error(
                         "dispatch_error",
                         f"Error in standing orders for {agent_id}: {e}",
                         {"type": "standing_orders", "agent": agent_id},
+                    )
+                    _record_dispatch_outcome(
+                        agent_id,
+                        "standing_orders",
+                        "error",
+                        started_at=started,
+                        error=str(e),
+                        config=cfg,
                     )
                     # Mark cadence even on failure to prevent infinite retry
                     # loops every tick.  The order retries after the normal
@@ -322,20 +394,47 @@ async def tick(*, config: Config | None = None) -> TickResult:
                 finally:
                     lock.close()
                 result.dispatched.append(record)
+                break  # One agent per tick — prevents serialized timeout kills
 
     # --- Drive consultations ---
+    # Per-agent stagger, mirroring the dream pattern. The original "fire all
+    # agents in one tick" design serialized N awaits inside a single 1-minute
+    # window; agents whose LLM consultation pushed past the next minute were
+    # silently skipped because the next tick saw _is_time_match("17:00")==False.
+    # Now each agent fires at base_time + idx * stagger_minutes, so each tick
+    # handles at most one agent per scheduled drive time and the bug class
+    # disappears structurally.
     if outside_hours and "drives" in _OPERATING_HOURS_GATED:
         result.skipped.append("drives: outside operating hours")
+        for agent_id in agent_ids:
+            emit_dispatch_skipped(
+                DispatchSkippedEvent(agent=agent_id, cycle_type="drives", reason="outside_operating_hours"),
+                config=cfg,
+            )
     elif cfg.schedule_drives_enabled:
         times = cfg.schedule_drives_weekend_times if _is_weekend(config=cfg) else cfg.schedule_drives_weekday_times
-        if any(_is_time_match(t, config=cfg) for t in times):
-            for agent_id in agent_ids:
+        now = _now(config=cfg)
+        for base_time in times:
+            try:
+                base_h, base_m = _parse_time(base_time)
+            except (ValueError, IndexError):
+                continue
+            for idx, agent_id in enumerate(agent_ids):
+                stagger_offset = idx * cfg.schedule_drives_stagger_minutes
+                target_total_minutes = base_h * 60 + base_m + stagger_offset
+                target_hour = (target_total_minutes // 60) % 24
+                target_minute = target_total_minutes % 60
+                if now.hour != target_hour or now.minute != target_minute:
+                    continue
+
                 lock = acquire_lock(agent_id, "drives", config=cfg)
                 if lock is None:
                     result.skipped.append(f"drives:{agent_id} locked")
+                    _record_dispatch_outcome(agent_id, "drives", "locked", config=cfg)
                     continue
 
                 record = DispatchRecord(type="drives", agent=agent_id, at=now_iso)
+                started = _now(config=cfg)
                 try:
                     get_logger("system").info(
                         "tick_dispatch",
@@ -349,11 +448,15 @@ async def tick(*, config: Config | None = None) -> TickResult:
                         f"Completed drive consultation for {agent_id}",
                         {"type": "drives", "agent": agent_id},
                     )
+                    _record_dispatch_outcome(agent_id, "drives", "success", started_at=started, config=cfg)
                 except Exception as e:
                     record.result = f"error: {e}"
                     get_logger("system").error(
-                        "dispatch_error", f"Error in drives for {agent_id}: {e}", {"type": "drives", "agent": agent_id}
+                        "dispatch_error",
+                        f"Error in drives for {agent_id}: {e}",
+                        {"type": "drives", "agent": agent_id},
                     )
+                    _record_dispatch_outcome(agent_id, "drives", "error", started_at=started, error=str(e), config=cfg)
                 finally:
                     lock.close()
                 result.dispatched.append(record)
@@ -377,9 +480,11 @@ async def tick(*, config: Config | None = None) -> TickResult:
             lock = acquire_lock(agent_id, "dream", config=cfg)
             if lock is None:
                 result.skipped.append(f"dream:{agent_id} locked")
+                _record_dispatch_outcome(agent_id, "dreams", "locked", config=cfg)
                 continue
 
             record = DispatchRecord(type="dreams", agent=agent_id, at=now_iso)
+            started = _now(config=cfg)
             try:
                 get_logger("system").info(
                     "tick_dispatch", f"Dispatching dream cycle for {agent_id}", {"type": "dreams", "agent": agent_id}
@@ -391,11 +496,13 @@ async def tick(*, config: Config | None = None) -> TickResult:
                     f"Completed dream cycle for {agent_id}",
                     {"type": "dreams", "agent": agent_id},
                 )
+                _record_dispatch_outcome(agent_id, "dreams", "success", started_at=started, config=cfg)
             except Exception as e:
                 record.result = f"error: {e}"
                 get_logger("system").error(
                     "dispatch_error", f"Error in dream for {agent_id}: {e}", {"type": "dreams", "agent": agent_id}
                 )
+                _record_dispatch_outcome(agent_id, "dreams", "error", started_at=started, error=str(e), config=cfg)
             finally:
                 lock.close()
             result.dispatched.append(record)
@@ -461,7 +568,7 @@ async def tick(*, config: Config | None = None) -> TickResult:
         record = DispatchRecord(type="digest", agent="system", at=now_iso)
         try:
             get_logger("system").info("tick_dispatch", "Running daily digest", {"type": "digest"})
-            maintenance.run_daily_digest(config=cfg)
+            maintenance.run_daily_digest(window="yesterday", config=cfg)
             record.result = "done"
         except Exception as e:
             record.result = f"error: {e}"
@@ -493,7 +600,7 @@ def get_schedule_status(*, config: Config | None = None) -> str:
         f" *Standing orders: {'ON' if cfg.schedule_standing_orders_enabled else 'OFF'} (every {cfg.schedule_standing_orders_interval_minutes}m)"
     )
     lines.append(
-        f" *Drives:          {'ON' if cfg.schedule_drives_enabled else 'OFF'} (weekday: {', '.join(cfg.schedule_drives_weekday_times)}, weekend: {', '.join(cfg.schedule_drives_weekend_times)})"
+        f" *Drives:          {'ON' if cfg.schedule_drives_enabled else 'OFF'} (weekday: {', '.join(cfg.schedule_drives_weekday_times)}, weekend: {', '.join(cfg.schedule_drives_weekend_times)}, stagger {cfg.schedule_drives_stagger_minutes}m)"
     )
     lines.append(
         f"  Dreams:          {'ON' if cfg.schedule_dreams_enabled else 'OFF'} (at {cfg.schedule_dreams_time}, stagger {cfg.schedule_dreams_stagger_minutes}m)"

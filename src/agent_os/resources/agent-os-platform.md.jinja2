@@ -156,8 +156,9 @@ agent-os includes a built-in observability layer. You don't operate it, but you 
 
 - **Pre-flight gate** — before each cycle, agent-os verifies you can write to your directories. If you can't (bad permissions), the cycle is blocked with a notification — no silent failure loops.
 - **Failure circuit breaker** — after N consecutive task failures (default 5), agent-os stops dispatching you and notifies the human. Auto-resets after a cooldown if the underlying issue resolves.
+- **Dispatch outcome events** — every scheduled dispatch attempt against you (cycle, standing-orders, drive, dream) appends a `dispatch_outcome` line to your daily log at `agents/logs/<your-id>/<date>.jsonl`. Each line records `type`, `outcome` (one of `success` / `error` / `locked`), `duration_sec`, and `error` if applicable. This is your **primary source** for "did I actually get a drive consultation today?" — don't reason from "it should have run" or "I had one recently"; grep your log. If a scheduled dispatch never fires, no `dispatch_outcome` line appears for it — silent absence is itself signal.
 - **Notifications** — file-drop to `operations/notifications/`, plus optional desktop/webhook/script delivery.
-- **Daily digest** — morning summary at `operations/digests/YYYY-MM-DD.md`.
+- **Daily digest** — morning summary at `operations/digests/YYYY-MM-DD.md`. The cron-driven digest defaults to **yesterday's** calendar-day totals so the morning briefing answers "what did the company do yesterday?" rather than showing near-zero midnight-to-now figures. The CLI command `agent-os digest` defaults to **today** (since midnight) for interactive "how's today going?" checks; use `--window yesterday` to switch.
 - **`agent-os doctor`** — humans run this to diagnose platform/config issues.
 
 If your work feels blocked for mysterious reasons ("I can't write to my task file"), the circuit breaker or pre-flight gate is likely involved. Check `operations/notifications/` for recent alerts and `agents/state/<your-id>/.circuit-breaker.json` for your breaker state.
@@ -172,6 +173,22 @@ Agents run on cadence. The two supported schedulers:
 - **systemd timers** — for service-account deployments. Same `agent-os tick` entry point, just a different trigger.
 
 You don't interact with the scheduler directly. It invokes you; you check for work; you exit.
+
+### Per-agent stagger for drives and dreams
+
+Drives and dreams use **per-agent stagger** so a single tick never has to dispatch to N agents in series. Each agent fires at `base_time + idx * stagger_minutes`, where `idx` is the agent's position in the registry list. With 5 agents and the default `stagger_minutes = 10`:
+
+| Agent index | Drive (base 17:00) | Dream (base 02:00) |
+|------------:|:-------------------|:--------------------|
+| 0 | 17:00 | 02:00 |
+| 1 | 17:10 | 02:10 |
+| 2 | 17:20 | 02:20 |
+| 3 | 17:30 | 02:30 |
+| 4 | 17:40 | 02:40 |
+
+This is why your drive may not run at the literal `weekday_times` in `agent-os.toml` — the configured time is the **base**, not your slot. The configured `stagger_minutes` keys are `[schedule.drives].stagger_minutes` and `[schedule.dreams].stagger_minutes`. Setting either to `0` reproduces the legacy "fan out at one tick" behavior (every agent fires at the base time) — fine for tiny deployments but reintroduces the bug class where a single tick has to await every agent serially.
+
+Standing orders and cycles are interval-based (minutes since last run), not time-of-day, so they don't use stagger.
 
 ---
 
@@ -190,7 +207,7 @@ You don't interact with the scheduler directly. It invokes you; you check for wo
 | `agent-os dream <agent-id>` | Run dream cycle |
 | `agent-os dashboard` | Launch the web dashboard |
 | `agent-os doctor` | Diagnose platform health issues |
-| `agent-os digest` | Generate daily health digest |
+| `agent-os digest [--window yesterday\|today]` | Generate daily health digest (CLI default: today; cron default: yesterday) |
 | `agent-os project init` | Bootstrap the workspace SDLC (remote, branches, gitignore) |
 | `agent-os project check` | Diagnose project-readiness (push auth, default branch, setup/validate commands) |
 | `agent-os project backfill` | One-time: seed the platform changelog from git history (for deployments that predate release notes) |
@@ -200,7 +217,7 @@ You don't interact with the scheduler directly. It invokes you; you check for wo
 | `agent-os manifest` | Regenerate knowledge manifest |
 | `agent-os watchdog` | Check agent liveness |
 | `agent-os cron {install,uninstall,status}` | Manage cron entry |
-| `agent-os update` | Self-update from git (regenerates this doc) |
+| `agent-os update` | Self-update from git checkout OR latest GitHub release wheel; regenerates this doc and posts a broadcast on version change |
 
 ---
 
@@ -252,6 +269,13 @@ weekly_cap = 500.00
 enabled = true
 [schedule.cycles]
 interval_minutes = 15
+[schedule.drives]
+weekday_times = ["17:00"]
+weekend_times = ["13:00"]
+stagger_minutes = 10             # idx*N offset per agent; 0 = legacy fan-out
+[schedule.dreams]
+time = "02:00"
+stagger_minutes = 10
 
 [notifications]
 enabled = true
@@ -269,6 +293,15 @@ cooldown_minutes = 60
 ## Versioning
 
 agent-os is versioned via git tags (`hatch-vcs`). Your current version is **v{{ version }}**. The changelog of platform updates is at `knowledge/technical/platform-changelog.md` — read it if you want to know what's changed since you last checked.
+
+### How updates reach this deployment
+
+`agent-os update` self-updates regardless of how the platform was installed:
+
+- **Git-checkout install** (`pip install -e .` from a clone): pulls `origin/<branch>`, `pip install -e .` reinstalls in place. Per-commit subjects from the local git log become the release-notes broadcast/changelog entries.
+- **Wheel install** (production): fetches the latest GitHub Release (default `corvyd-ai/agent-os@latest` — every merge to `main` republishes this release with a new wheel via CI), downloads the `.whl` asset, `pip install --upgrade --force-reinstall --no-deps`. The release body's bullet lines become the broadcast/changelog entries; the `Commit: <sha>` footer is captured for traceability. Override the release source via `--source owner/repo@tag` or `[update].source` in `agent-os.toml`.
+
+Either path ends by writing release notes to `knowledge/technical/` so you, the agent, learn what's new — without that, you'd be running new code with old mental models. If a deployment uses neither path (e.g. a direct `pip install --force-reinstall <wheel-url>` script), the release-notes mechanism never fires; the operator should switch to `agent-os update` to keep agents in sync with platform changes.
 
 ---
 
