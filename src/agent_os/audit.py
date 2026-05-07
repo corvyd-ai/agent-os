@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -122,6 +123,46 @@ def _age_hours(path: Path) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _detect_github_repo(config: Config) -> str | None:
+    """Detect a GitHub ``owner/repo`` slug from config or cwd.
+
+    Checks the configured project repo path first, then falls back to
+    the current working directory.  Returns *None* when no GitHub remote
+    can be identified.
+    """
+    _gh_url_re = re.compile(
+        r"(?:https://github\.com/|git@github\.com:)"
+        r"([^/]+/[^/.]+?)(?:\.git)?$"
+    )
+    candidates: list[Path] = []
+    # Prefer the explicitly-configured repo root
+    try:
+        repo_root = config.repo_root
+        candidates.append(repo_root)
+    except Exception:  # pragma: no cover — defensive
+        pass
+    candidates.append(Path.cwd())
+
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(path), "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                continue
+            m = _gh_url_re.match(result.stdout.strip())
+            if m:
+                return m.group(1)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
 def check_prs(config: Config) -> AuditCheck:
     """For workspace SDLC tasks in done/, verify a PR exists on GitHub.
 
@@ -130,13 +171,14 @@ def check_prs(config: Config) -> AuditCheck:
     """
     findings: list[AuditFinding] = []
 
-    # Fast-exit: if workspace SDLC isn't configured, no PRs to check
-    if not config.project_enabled:
+    # Detect the GitHub repo — works even without full SDLC (setup/validate)
+    repo_slug = _detect_github_repo(config)
+    if not repo_slug:
         return AuditCheck(
             name="PR verification",
             status="pass",
-            findings=[AuditFinding("pass", "No workspace SDLC configured — nothing to check")],
-            summary="N/A: workspace SDLC not configured",
+            findings=[AuditFinding("pass", "No GitHub repository detected — nothing to check")],
+            summary="N/A: no GitHub repo detected",
         )
 
     done_dir = config.tasks_done
@@ -192,7 +234,19 @@ def check_prs(config: Config) -> AuditCheck:
     # Batch-query PRs — get all open and merged PRs
     try:
         result = subprocess.run(
-            ["gh", "pr", "list", "--state", "all", "--limit", "200", "--json", "headRefName,state,url"],
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo_slug,
+                "--state",
+                "all",
+                "--limit",
+                "200",
+                "--json",
+                "headRefName,state,url",
+            ],
             capture_output=True,
             text=True,
             timeout=30,
