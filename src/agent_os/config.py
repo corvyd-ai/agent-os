@@ -125,6 +125,9 @@ class Config:
     schedule_watchdog_interval_minutes: int = 15
     schedule_watchdog_alert_threshold_minutes: int = 45
     schedule_watchdog_alert_hook: str = ""
+    # Stale task requeue: tasks in in-progress/ with no log activity for this
+    # many minutes are moved back to queued/. 0 = disabled.
+    stale_task_requeue_minutes: int = 30
 
     # Digest
     schedule_digest_enabled: bool = True
@@ -366,6 +369,8 @@ class Config:
             kwargs["schedule_watchdog_alert_threshold_minutes"] = int(watchdog["alert_threshold_minutes"])
         if "alert_hook" in watchdog:
             kwargs["schedule_watchdog_alert_hook"] = watchdog["alert_hook"]
+        if "stale_task_requeue_minutes" in watchdog:
+            kwargs["stale_task_requeue_minutes"] = int(watchdog["stale_task_requeue_minutes"])
         digest = maint.get("digest", {})
         if "enabled" in digest:
             kwargs["schedule_digest_enabled"] = bool(digest["enabled"])
