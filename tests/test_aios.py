@@ -193,6 +193,40 @@ def test_complete_task_outcome_partial(aios_fs):
     assert meta["outcome"] == "partial"
 
 
+def test_complete_task_from_in_review(aios_fs):
+    """complete_task handles in-review/ -> done/ transition."""
+    _create_task(aios_fs["TASKS_QUEUED"], "task-2026-0101-001", assigned_to="agent-001-maker")
+    claim_task("agent-001-maker", "task-2026-0101-001")
+    submit_for_review("task-2026-0101-001")
+    # Verify task is in in-review/
+    assert list(aios_fs["TASKS_IN_REVIEW"].glob("task-2026-0101-001*"))
+    assert not list(aios_fs["TASKS_IN_PROGRESS"].glob("task-2026-0101-001*"))
+
+    result = complete_task("task-2026-0101-001")
+    assert result is not None
+    assert result.parent == aios_fs["TASKS_DONE"]
+    meta, _ = _parse_frontmatter(result)
+    assert meta["status"] == "done"
+    assert meta["outcome"] == "success"
+    # No stray copy left in in-review/
+    assert not list(aios_fs["TASKS_IN_REVIEW"].glob("task-2026-0101-001*"))
+
+
+def test_complete_task_prefers_in_progress_over_in_review(aios_fs):
+    """If a task is in both in-progress/ and in-review/ (pathological),
+    complete_task should move the in-progress/ copy first."""
+    _create_task(aios_fs["TASKS_IN_PROGRESS"], "task-2026-0101-001")
+    _create_task(aios_fs["TASKS_IN_REVIEW"], "task-2026-0101-001")
+
+    result = complete_task("task-2026-0101-001")
+    assert result is not None
+    assert result.parent == aios_fs["TASKS_DONE"]
+    # in-progress/ copy was moved
+    assert not list(aios_fs["TASKS_IN_PROGRESS"].glob("task-2026-0101-001*"))
+    # in-review/ copy still there (untouched — only one moved)
+    assert list(aios_fs["TASKS_IN_REVIEW"].glob("task-2026-0101-001*"))
+
+
 def test_fail_task(aios_fs):
     _create_task(aios_fs["TASKS_QUEUED"], "task-2026-0101-001", assigned_to="agent-001-maker")
     claim_task("agent-001-maker", "task-2026-0101-001")

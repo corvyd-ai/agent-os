@@ -62,9 +62,9 @@ def build_aios_tools(
     @tool(
         name="complete_task",
         description=(
-            "Mark a task as complete. Moves the task from in-progress/ to done/ "
-            "and updates frontmatter status. Use this instead of manually editing "
-            "task files."
+            "Mark a task as complete. Moves the task from in-progress/ or "
+            "in-review/ to done/ and updates frontmatter status. Use this "
+            "instead of manually editing task files."
         ),
         input_schema={"task_id": str},
     )
@@ -84,7 +84,7 @@ def build_aios_tools(
         result = aios.complete_task(task_id, outcome="success", config=cfg)
         if result:
             return _text_response(f"Task {task_id} moved to done/ at {result}")
-        return _text_response(f"Error: task {task_id} not found in in-progress/", is_error=True)
+        return _text_response(f"Error: task {task_id} not found in in-progress/ or in-review/", is_error=True)
 
     @tool(
         name="fail_task",
