@@ -27,6 +27,16 @@ WATCHDOG_SKIP_DIRS: frozenset[str] = frozenset({"system", "human"})
 
 
 @dataclass
+class RequeueResult:
+    """Result of a stale-task requeue run."""
+
+    tasks_checked: int = 0
+    tasks_requeued: int = 0
+    requeued: list[str] = field(default_factory=list)
+    skipped_has_lock: int = 0
+
+
+@dataclass
 class ArchiveResult:
     """Result of an archive run."""
 
@@ -288,6 +298,221 @@ def run_watchdog(*, config: Config | None = None) -> WatchdogResult:
                 title=f"Watchdog: {result.agents_stale} stale agent(s)",
                 detail=f"Stale agents detected:\n{alert_text}",
                 refs={"agents_stale": result.agents_stale, "agents_healthy": result.agents_healthy},
+            ),
+            config=cfg,
+        )
+
+    return result
+
+
+# --- Stale task requeue ---
+
+
+def _find_last_task_event(
+    agent_id: str,
+    task_id: str,
+    *,
+    config: Config | None = None,
+) -> tuple[datetime | None, str | None]:
+    """Find the most recent JSONL log event mentioning a specific task.
+
+    Scans today's and yesterday's log files for the assigned agent, looking
+    for entries whose ``refs`` dict contains the task_id under either the
+    ``task_id`` or ``task`` key (the runner uses both conventions).
+
+    Returns ``(timestamp, action)`` of the latest matching entry, or
+    ``(None, None)`` if no events are found.
+    """
+    cfg = config or get_config()
+    log_dir = cfg.logs_dir / agent_id
+    if not log_dir.exists():
+        return None, None
+
+    now = datetime.now(cfg.tz)
+    from datetime import timedelta
+
+    dates = [
+        now.strftime("%Y-%m-%d"),
+        (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+    ]
+
+    latest_time: datetime | None = None
+    latest_action: str | None = None
+
+    for date_str in dates:
+        log_file = log_dir / f"{date_str}.jsonl"
+        if not log_file.exists():
+            continue
+
+        for line in log_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                refs = entry.get("refs", {})
+                # Runner logs task under "task_id" or "task" in refs
+                if refs.get("task_id") == task_id or refs.get("task") == task_id:
+                    ts = datetime.fromisoformat(entry["timestamp"])
+                    if latest_time is None or ts > latest_time:
+                        latest_time = ts
+                        latest_action = entry.get("action", "unknown")
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+
+    return latest_time, latest_action
+
+
+def requeue_stale_tasks(*, config: Config | None = None) -> RequeueResult:
+    """Detect and requeue tasks stuck in in-progress/ due to interrupted cycles.
+
+    A task is considered stale when:
+    1. It is in ``tasks/in-progress/``
+    2. The assigned agent's JSONL logs show no activity for this task within
+       ``stale_task_requeue_minutes`` (default 30)
+    3. The last log event is NOT a terminal event (completed_task, task_failed)
+
+    Recovery:
+    - Task is moved back to ``queued/`` with a requeue note
+    - If a worktree exists with uncommitted changes, it is preserved (not deleted)
+    - A ``task_requeued_stale_claim`` event is logged and notified
+
+    Returns a :class:`RequeueResult` summarizing what was done.
+    """
+    from .core import _parse_frontmatter, log_action, requeue_task
+
+    cfg = config or get_config()
+    result = RequeueResult()
+    stale_minutes = cfg.stale_task_requeue_minutes
+
+    if stale_minutes <= 0:
+        return result  # Disabled
+
+    if not cfg.tasks_in_progress.exists():
+        return result
+
+    now = datetime.now(cfg.tz)
+    from datetime import timedelta
+
+    cutoff = now - timedelta(minutes=stale_minutes)
+
+    # Terminal actions — if the last event is one of these, the task is
+    # completing normally (or already failed) and should not be requeued.
+    terminal_actions = frozenset(
+        {
+            "completed_task",
+            "task_failed",
+            "sdk_complete",
+            "quality_gates_passed",
+            "task_submitted_for_review",
+        }
+    )
+
+    # Collect task files first to avoid modifying the directory during iteration
+    task_files = list(cfg.tasks_in_progress.glob("*.md"))
+
+    for task_file in task_files:
+        result.tasks_checked += 1
+
+        try:
+            meta, _body = _parse_frontmatter(task_file)
+        except Exception:
+            continue
+
+        task_id = meta.get("id", task_file.stem)
+        agent_id = meta.get("assigned_to", "")
+
+        if not agent_id:
+            continue
+
+        # Find the most recent log event for this task
+        last_event_time, last_event_action = _find_last_task_event(agent_id, task_id, config=cfg)
+
+        if last_event_time is not None:
+            if last_event_time > cutoff:
+                continue  # Recent activity — not stale
+
+            if last_event_action in terminal_actions:
+                continue  # Task is completing normally
+        else:
+            # No log events found — fall back to file mtime
+            try:
+                file_mtime = datetime.fromtimestamp(task_file.stat().st_mtime, tz=cfg.tz)
+            except OSError:
+                continue
+
+            if file_mtime > cutoff:
+                continue  # Recently modified
+
+            last_event_time = file_mtime
+            last_event_action = None
+
+        # This task is stale — compute elapsed time
+        elapsed_minutes = (now - last_event_time).total_seconds() / 60
+
+        # Check for worktree with uncommitted changes
+        worktree_path = cfg.worktrees_root / task_id
+        has_worktree = worktree_path.exists()
+
+        # Requeue the task
+        reason = (
+            f"Stale claim: no agent activity for {elapsed_minutes:.0f} minutes "
+            f"(threshold: {stale_minutes}m). "
+            f"Last event: {last_event_action or 'none'}."
+        )
+        new_path = requeue_task(task_id, reason, config=cfg)
+
+        if new_path is None:
+            continue  # Task was moved by another process
+
+        # Log the requeue event
+        log_action(
+            "system",
+            "task_requeued_stale_claim",
+            f"Requeued {task_id} after {elapsed_minutes:.0f}m idle",
+            {
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "elapsed_minutes": round(elapsed_minutes, 1),
+                "has_worktree": has_worktree,
+                "last_event_action": last_event_action or "none",
+            },
+            config=cfg,
+        )
+
+        result.tasks_requeued += 1
+        result.requeued.append(task_id)
+
+        # Send notification
+        from .notifications import NotificationEvent, send_notification
+
+        worktree_note = ""
+        if has_worktree:
+            worktree_note = (
+                f"\n\n**Worktree preserved** at `{worktree_path}` — "
+                f"the next invocation should commit or resume this work."
+            )
+
+        send_notification(
+            NotificationEvent(
+                event_type="task_requeued_stale_claim",
+                severity="warning",
+                title=f"Stale task {task_id} requeued",
+                detail=(
+                    f"Task **{task_id}** (assigned to {agent_id}) was stuck in "
+                    f"`in-progress/` for {elapsed_minutes:.0f} minutes with no "
+                    f"agent activity. Moved back to `queued/` for re-dispatch.\n\n"
+                    f"Last event: `{last_event_action or 'none'}`\n"
+                    f"Threshold: {stale_minutes} minutes"
+                    f"{worktree_note}"
+                ),
+                agent_id=agent_id,
+                refs={
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "elapsed_minutes": round(elapsed_minutes, 1),
+                    "has_worktree": has_worktree,
+                },
             ),
             config=cfg,
         )

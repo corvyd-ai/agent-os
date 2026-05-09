@@ -160,7 +160,11 @@ def _deps_satisfied(depends_on: list[str], *, config: Config | None = None) -> b
 
 
 def complete_task(task_id: str, *, outcome: str = "success", config: Config | None = None) -> Path | None:
-    """Move a task from in-progress/ to done/.
+    """Move a task from in-progress/ or in-review/ to done/.
+
+    Searches in-progress/ first, then in-review/. This lets agents close
+    tasks that were submitted for review without requiring human SSH
+    intervention.
 
     Args:
         task_id: The task ID to complete.
@@ -169,7 +173,11 @@ def complete_task(task_id: str, *, outcome: str = "success", config: Config | No
         config: Optional Config override.
     """
     cfg = config or get_config()
-    return _move_task(task_id, cfg.tasks_in_progress, cfg.tasks_done, "done", extra_meta={"outcome": outcome})
+    for source in (cfg.tasks_in_progress, cfg.tasks_in_review):
+        result = _move_task(task_id, source, cfg.tasks_done, "done", extra_meta={"outcome": outcome})
+        if result is not None:
+            return result
+    return None
 
 
 def submit_for_review(task_id: str, *, config: Config | None = None) -> Path | None:
@@ -224,6 +232,28 @@ def fail_task(
     _write_frontmatter(task_file, meta, body)
 
     dest = cfg.tasks_failed / task_file.name
+    shutil.move(str(task_file), str(dest))
+    return dest
+
+
+def requeue_task(task_id: str, reason: str, *, config: Config | None = None) -> Path | None:
+    """Move a task from in-progress/ back to queued/ (stale-claim recovery).
+
+    Updates frontmatter status to "queued" and appends a requeue note to the body.
+    Returns the new path in queued/, or None if the task wasn't found.
+    """
+    cfg = config or get_config()
+    candidates = list(cfg.tasks_in_progress.glob(f"{task_id}*"))
+    if not candidates:
+        return None
+    task_file = candidates[0]
+
+    meta, body = _parse_frontmatter(task_file)
+    meta["status"] = "queued"
+    body += f"\n\n## Requeued\n\n**Date**: {_now_iso(config=cfg)}\n**Reason**: {reason}\n"
+    _write_frontmatter(task_file, meta, body)
+
+    dest = cfg.tasks_queued / task_file.name
     shutil.move(str(task_file), str(dest))
     return dest
 
