@@ -563,6 +563,24 @@ async def tick(*, config: Config | None = None) -> TickResult:
             record.result = f"error: {e}"
         result.dispatched.append(record)
 
+    # Stale task requeue — runs on the same cadence as the watchdog
+    if (
+        cfg.schedule_watchdog_enabled
+        and cfg.stale_task_requeue_minutes > 0
+        and _is_cadence_due("system", "scheduler-requeue", cfg.schedule_watchdog_interval_minutes, config=cfg)
+    ):
+        requeue_record = DispatchRecord(type="stale_requeue", agent="system", at=now_iso)
+        try:
+            requeue_result = maintenance.requeue_stale_tasks(config=cfg)
+            if requeue_result.tasks_requeued:
+                requeue_record.result = f"requeued: {', '.join(requeue_result.requeued)}"
+            else:
+                requeue_record.result = "done: no stale tasks"
+            _mark_scheduler_cadence("system", "scheduler-requeue", config=cfg)
+        except Exception as e:
+            requeue_record.result = f"error: {e}"
+        result.dispatched.append(requeue_record)
+
     # Digest
     if cfg.schedule_digest_enabled and _is_time_match(cfg.schedule_digest_time, config=cfg):
         record = DispatchRecord(type="digest", agent="system", at=now_iso)
