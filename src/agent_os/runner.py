@@ -1191,6 +1191,26 @@ async def _run_agent_with_workspace(
                 log.info("workspace_pushed", f"Pushed {workspace.branch}", {"task_id": task_id})
                 # --- Compose a one-click PR URL (GitHub only; purely informational) ---
                 pr_url, pr_message = build_pr_url(workspace, task_meta, agent_config.agent_id, config=cfg)
+                # --- Create artifact record for layer-2 tracking ---
+                try:
+                    from .artifacts import create_artifact
+
+                    create_artifact(
+                        task_id=task_id,
+                        agent_id=agent_config.agent_id,
+                        artifact_type="github_pr" if pr_url else "git_commit",
+                        provider="github" if pr_url else "local",
+                        ref=pr_url or "",
+                        branch=workspace.branch,
+                        sha=sha,
+                        config=cfg,
+                    )
+                except Exception as art_exc:
+                    log.warn(
+                        "artifact_create_failed",
+                        f"Could not create artifact record: {art_exc}",
+                        {"task_id": task_id},
+                    )
                 if pr_url:
                     log.info(
                         "workspace_pr_ready",

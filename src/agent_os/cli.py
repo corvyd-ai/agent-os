@@ -49,6 +49,7 @@ INIT_DIRS = [
     "knowledge",
     "knowledge/technical",
     "operations/scripts",
+    "state/artifacts",
 ]
 
 
@@ -1068,6 +1069,8 @@ def cmd_audit(args):
             checks.append("worktrees")
         if getattr(args, "check_stale_tasks", False):
             checks.append("stale_tasks")
+        if getattr(args, "check_artifacts", False):
+            checks.append("artifacts")
 
     # If nothing selected, default to all
     if not checks:
@@ -1083,6 +1086,72 @@ def cmd_audit(args):
         print(format_audit_report(report, no_color=no_color))
 
     sys.exit(1 if report.fail_count else 0)
+
+
+# --- poll command ---
+
+
+def cmd_poll(args):
+    """Poll external services for artifact status updates."""
+    _set_root(args)
+    from .artifacts import list_artifacts, load_artifact, record_transition, save_artifact
+    from .config import get_config
+    from .pollers.github_pr import gh_available, poll_prs
+
+    cfg = get_config()
+
+    if not cfg.project_enabled:
+        print("No workspace SDLC configured — nothing to poll.")
+        return
+
+    # Get all non-terminal artifacts
+    terminal = {"closed", "deployed"}
+    all_arts = list_artifacts(config=cfg)
+    active = [a for a in all_arts if a.current_state not in terminal]
+
+    if not active:
+        print("No active artifacts to poll.")
+        return
+
+    # Filter to GitHub PR artifacts
+    github_arts = [a for a in active if a.provider == "github"]
+    if not github_arts:
+        print("No GitHub artifacts to poll.")
+        return
+
+    if not gh_available():
+        print("GitHub CLI (gh) not available or not authenticated.")
+        sys.exit(1)
+
+    repo = getattr(args, "repo", "") or ""
+    results = poll_prs(github_arts, repo=repo)
+
+    transitions = 0
+    errors = 0
+    for result in results:
+        if result.error:
+            print(f"  Error polling {result.task_id}: {result.error}")
+            errors += 1
+            continue
+
+        if result.new_state:
+            record_transition(result.task_id, result.new_state, result.detail, config=cfg)
+            print(f"  {result.task_id}: {result.new_state}")
+            transitions += 1
+
+            # Update the artifact ref if the poller discovered the PR URL
+            if result.detail.get("update_ref"):
+                art = load_artifact(result.task_id, config=cfg)
+                if art and not art.ref:
+                    art.ref = result.detail["update_ref"]
+                    save_artifact(art, config=cfg)
+        else:
+            if getattr(args, "verbose", False):
+                art = load_artifact(result.task_id, config=cfg)
+                state = art.current_state if art else "unknown"
+                print(f"  {result.task_id}: no change ({state})")
+
+    print(f"\n{transitions} transition(s), {errors} error(s), {len(github_arts)} artifact(s) polled.")
 
 
 # --- digest command ---
@@ -2307,6 +2376,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--check-freshness", action="store_true", help="Check agent working-memory freshness")
     p_audit.add_argument("--check-worktrees", action="store_true", help="Find dead worktrees with no active task")
     p_audit.add_argument("--check-stale-tasks", action="store_true", help="Find stuck in-progress tasks")
+    p_audit.add_argument(
+        "--check-artifacts", action="store_true", help="List tracked artifacts, flag stale ones"
+    )
     p_audit.add_argument("--all", action="store_true", help="Run all checks")
     p_audit.add_argument("--json", action="store_true", help="Output as JSON")
     p_audit.add_argument("--no-color", action="store_true", help="Disable color output")
@@ -2318,6 +2390,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_config_args(p_audit)
     p_audit.set_defaults(func=cmd_audit)
+
+    # poll — poll external services for artifact status updates
+    p_poll = subparsers.add_parser("poll", help="Poll external services for artifact status updates")
+    p_poll.add_argument("--repo", default="", help="GitHub repo (owner/repo) to poll. Default: auto-detect.")
+    p_poll.add_argument("--verbose", "-v", action="store_true", help="Show unchanged artifacts too")
+    _add_common_args(p_poll)
+    p_poll.set_defaults(func=cmd_poll)
 
     # digest
     p_digest = subparsers.add_parser("digest", help="Generate health digest")

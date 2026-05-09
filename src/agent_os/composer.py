@@ -186,6 +186,16 @@ class PromptComposer:
             )
             yield "broadcasts", f"# Broadcast Channel\n\n{broadcast_text}"
 
+        # 8.5. Pending artifacts (workspace SDLC tasks with open PRs)
+        if cfg.project_enabled:
+            from .artifacts import format_artifacts_digest, get_pending_artifacts
+
+            pending_arts = get_pending_artifacts(config=cfg)
+            if pending_arts:
+                digest = format_artifacts_digest(pending_arts)
+                if digest:
+                    yield "pending_artifacts", digest
+
         # 9. Open system notes (feedback from operator / dashboard)
         notes = aios.read_feedback(status="open", config=cfg)
         if notes:

@@ -79,7 +79,7 @@ class AuditReport:
 # Helpers
 # ---------------------------------------------------------------------------
 
-ALL_CHECKS = ["prs", "budget", "dispatch", "freshness", "worktrees", "stale_tasks"]
+ALL_CHECKS = ["prs", "budget", "dispatch", "freshness", "worktrees", "stale_tasks", "artifacts"]
 
 
 def _parse_task_frontmatter(path: Path) -> dict:
@@ -543,6 +543,71 @@ def check_stale_tasks(config: Config, *, threshold_hours: float = 6.0) -> AuditC
     return AuditCheck(name="Stale tasks", status=status, findings=findings, summary=summary)
 
 
+def check_artifacts(config: Config, *, stale_threshold_hours: float = 48.0) -> AuditCheck:
+    """List all tracked artifacts. Flag stale ones (>48h, not in terminal state).
+
+    This is the ``--check-artifacts`` audit view. Makes layer-2 artifact
+    lifecycle visible to governance scans from the moment it ships.
+    """
+    findings: list[AuditFinding] = []
+
+    if not config.project_enabled:
+        return AuditCheck(
+            name="Artifact lifecycle",
+            status="pass",
+            findings=[AuditFinding("pass", "No workspace SDLC configured — nothing to check")],
+            summary="N/A: workspace SDLC not configured",
+        )
+
+    artifacts_dir = config.company_root / "state" / "artifacts"
+    if not artifacts_dir.exists():
+        return AuditCheck(
+            name="Artifact lifecycle",
+            status="pass",
+            findings=[AuditFinding("pass", "No artifacts directory yet")],
+            summary="No artifacts tracked",
+        )
+
+    from .artifacts import list_artifacts as list_all_artifacts
+
+    all_arts = list_all_artifacts(config=config)
+    if not all_arts:
+        return AuditCheck(
+            name="Artifact lifecycle",
+            status="pass",
+            findings=[AuditFinding("pass", "No artifact records found")],
+            summary="No artifacts",
+        )
+
+    stale_arts = list_all_artifacts(stale_threshold_hours=stale_threshold_hours, config=config)
+
+    for art in all_arts:
+        is_stale = art in stale_arts
+        state_label = art.current_state
+        if art.current_state == "merged" and "deployed_in" not in art.metadata:
+            state_label += " (unverified deploy)"
+
+        if is_stale:
+            findings.append(
+                AuditFinding(
+                    "warn",
+                    f"{art.task_id}: {state_label} — stale (created {art.created_at})",
+                )
+            )
+        else:
+            level = "pass"
+            findings.append(
+                AuditFinding(level, f"{art.task_id}: {state_label}")
+            )
+
+    status = _worst_status(findings)
+    stale_count = len(stale_arts)
+    summary = f"{len(all_arts)} artifacts tracked"
+    if stale_count:
+        summary += f", {stale_count} stale"
+    return AuditCheck(name="Artifact lifecycle", status=status, findings=findings, summary=summary)
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -572,6 +637,7 @@ def run_audit(
         "freshness": lambda: check_freshness(cfg),
         "worktrees": lambda: check_worktrees(cfg),
         "stale_tasks": lambda: check_stale_tasks(cfg, threshold_hours=stale_task_hours),
+        "artifacts": lambda: check_artifacts(cfg),
     }
 
     for name in run_checks:
