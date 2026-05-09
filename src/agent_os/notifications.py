@@ -59,6 +59,7 @@ KNOWN_EVENT_TYPES: dict[str, str] = {
     "message_for_human": "An agent sent a message to the human inbox.",
     "cycle_outcome": "Structured event emitted when a task cycle ends, separating process status from artifact status.",
     "dispatch_skipped": "Emitted when the scheduler evaluates an agent and decides not to fire (with reason).",
+    "task_requeued_stale_claim": "A task stuck in in-progress/ with no recent agent activity was automatically moved back to queued/.",
 }
 
 
