@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_os.audit import (
+    _detect_github_repo,
     check_budget,
     check_dispatch,
     check_freshness,
@@ -67,65 +68,122 @@ def _write_log_entry(config: Config, agent_id: str, action: str, task_id: str | 
 # ---------------------------------------------------------------------------
 
 
+class TestDetectGithubRepo:
+    """Tests for _detect_github_repo helper."""
+
+    @patch("agent_os.audit.subprocess.run")
+    def test_detects_https_remote(self, mock_run, aios_config):
+        """Should extract owner/repo from an HTTPS GitHub remote."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "https://github.com/corvyd-ai/agent-os.git\n"
+        mock_run.return_value = result
+
+        slug = _detect_github_repo(aios_config)
+        assert slug == "corvyd-ai/agent-os"
+
+    @patch("agent_os.audit.subprocess.run")
+    def test_detects_ssh_remote(self, mock_run, aios_config):
+        """Should extract owner/repo from an SSH GitHub remote."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "git@github.com:corvyd-ai/agent-os.git\n"
+        mock_run.return_value = result
+
+        slug = _detect_github_repo(aios_config)
+        assert slug == "corvyd-ai/agent-os"
+
+    @patch("agent_os.audit.subprocess.run")
+    def test_no_git_repo(self, mock_run, aios_config):
+        """Should return None when not in a git repo."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.returncode = 128
+        result.stdout = ""
+        mock_run.return_value = result
+
+        slug = _detect_github_repo(aios_config)
+        assert slug is None
+
+    @patch("agent_os.audit.subprocess.run")
+    def test_non_github_remote(self, mock_run, aios_config):
+        """Should return None for non-GitHub remotes."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "https://gitlab.com/org/repo.git\n"
+        mock_run.return_value = result
+
+        slug = _detect_github_repo(aios_config)
+        assert slug is None
+
+    @patch("agent_os.audit.subprocess.run")
+    def test_https_without_dotgit(self, mock_run, aios_config):
+        """Should handle HTTPS URLs without trailing .git."""
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "https://github.com/corvyd-ai/agent-os\n"
+        mock_run.return_value = result
+
+        slug = _detect_github_repo(aios_config)
+        assert slug == "corvyd-ai/agent-os"
+
+
 class TestCheckPrs:
-    def test_no_project_configured(self, aios_config):
-        """When workspace SDLC is not configured, should pass."""
+    @patch("agent_os.audit._detect_github_repo", return_value=None)
+    def test_no_github_repo_detected(self, mock_detect, aios_config):
+        """When no GitHub repo is detected, should pass with N/A."""
         result = check_prs(aios_config)
         assert result.status == "pass"
-        assert "not configured" in result.summary.lower() or "not configured" in result.findings[0].message.lower()
+        assert "no github repo" in result.summary.lower()
 
-    def test_no_done_tasks(self, aios_config):
-        """With SDLC configured but no done tasks, should pass."""
-        cfg = Config(
-            company_root=aios_config.company_root,
-            project_validate_commands=["pytest"],
-        )
-        result = check_prs(cfg)
+    @patch("agent_os.audit._detect_github_repo", return_value="test-org/test-repo")
+    def test_no_done_tasks(self, mock_detect, aios_config):
+        """With repo detected but no done tasks, should pass."""
+        result = check_prs(aios_config)
         assert result.status == "pass"
 
     @patch("agent_os.audit.subprocess.run")
-    def test_gh_not_installed(self, mock_run, aios_config):
+    @patch("agent_os.audit._detect_github_repo", return_value="test-org/test-repo")
+    def test_gh_not_installed(self, mock_detect, mock_run, aios_config):
         """When gh CLI is not available, should warn gracefully."""
-        cfg = Config(
-            company_root=aios_config.company_root,
-            project_validate_commands=["pytest"],
-        )
-        _write_task(cfg.tasks_done, "task-2026-0503-001", "agent-001-maker")
+        _write_task(aios_config.tasks_done, "task-2026-0503-001", "agent-001-maker")
         mock_run.side_effect = FileNotFoundError("gh not found")
-        result = check_prs(cfg)
+        result = check_prs(aios_config)
         assert result.status == "warn"
         assert any("not available" in f.message for f in result.findings)
 
     @patch("agent_os.audit.subprocess.run")
-    def test_gh_not_authenticated(self, mock_run, aios_config):
+    @patch("agent_os.audit._detect_github_repo", return_value="test-org/test-repo")
+    def test_gh_not_authenticated(self, mock_detect, mock_run, aios_config):
         """When gh auth fails, should warn gracefully."""
         from unittest.mock import MagicMock
 
-        cfg = Config(
-            company_root=aios_config.company_root,
-            project_validate_commands=["pytest"],
-        )
-        _write_task(cfg.tasks_done, "task-2026-0503-001", "agent-001-maker")
+        _write_task(aios_config.tasks_done, "task-2026-0503-001", "agent-001-maker")
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_run.return_value = mock_result
-        result = check_prs(cfg)
+        result = check_prs(aios_config)
         assert result.status == "warn"
         assert any("not authenticated" in f.message for f in result.findings)
 
     @patch("agent_os.audit.subprocess.run")
-    def test_finds_missing_prs(self, mock_run, aios_config):
+    @patch("agent_os.audit._detect_github_repo", return_value="test-org/test-repo")
+    def test_finds_missing_prs(self, mock_detect, mock_run, aios_config):
         """Tasks in done/ without matching PRs should be flagged."""
         from unittest.mock import MagicMock
 
-        cfg = Config(
-            company_root=aios_config.company_root,
-            project_validate_commands=["pytest"],
-        )
-
-        _write_agent_registry(cfg, "agent-001-maker")
-        _write_task(cfg.tasks_done, "task-2026-0503-001", "agent-001-maker")
-        _write_task(cfg.tasks_done, "task-2026-0503-002", "agent-001-maker")
+        _write_agent_registry(aios_config, "agent-001-maker")
+        _write_task(aios_config.tasks_done, "task-2026-0503-001", "agent-001-maker")
+        _write_task(aios_config.tasks_done, "task-2026-0503-002", "agent-001-maker")
 
         # Mock gh auth status (success) and gh pr list
         auth_result = MagicMock()
@@ -140,7 +198,7 @@ class TestCheckPrs:
 
         mock_run.side_effect = [auth_result, pr_result]
 
-        result = check_prs(cfg)
+        result = check_prs(aios_config)
         assert result.status == "warn"
         assert "1 verified" in result.summary
         assert "1 missing" in result.summary
