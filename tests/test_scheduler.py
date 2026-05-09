@@ -101,6 +101,7 @@ class TestOperatingHoursGatedConstant:
         assert "cycle" in _OPERATING_HOURS_GATED
         assert "standing_orders" in _OPERATING_HOURS_GATED
         assert "drives" in _OPERATING_HOURS_GATED
+        assert "observe" in _OPERATING_HOURS_GATED
 
     def test_exempt_types(self):
         assert "dreams" not in _OPERATING_HOURS_GATED
@@ -166,6 +167,7 @@ def _make_cfg(tmp_path, *, operating_hours="07:00-23:00", dreams_time="02:00", a
         schedule_dreams_enabled=True,
         schedule_dreams_time=dreams_time,
         schedule_dreams_stagger_minutes=0,
+        schedule_observe_enabled=False,
         schedule_archive_enabled=True,
         schedule_archive_time=archive_time,
         schedule_manifest_enabled=True,
@@ -354,6 +356,7 @@ def _make_minimal_cfg(tmp_path, **overrides):
         schedule_standing_orders_enabled=False,
         schedule_drives_enabled=False,
         schedule_dreams_enabled=False,
+        schedule_observe_enabled=False,
         schedule_archive_enabled=False,
         schedule_manifest_enabled=False,
         schedule_watchdog_enabled=False,

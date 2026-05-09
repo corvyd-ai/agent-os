@@ -391,6 +391,29 @@ def cmd_dream(args):
         sys.exit(1)
 
 
+# --- observe command ---
+
+
+def cmd_observe(args):
+    """Run observe cycle for an agent (reality grounding)."""
+    _set_root(args)
+    from .runner import run_observe_cycle
+
+    try:
+        asyncio.run(
+            run_observe_cycle(
+                args.agent,
+                max_turns=args.max_turns,
+                max_budget_usd=args.max_budget,
+            )
+        )
+    except FileNotFoundError as e:
+        _handle_agent_not_found(e)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 # --- tick command ---
 
 
@@ -2235,6 +2258,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common_args(p_dream)
     p_dream.set_defaults(func=cmd_dream)
 
+    # observe
+    p_observe = subparsers.add_parser("observe", help="Run observe cycle for an agent (reality grounding)")
+    p_observe.add_argument("agent", help="Agent ID")
+    _add_common_args(p_observe)
+    p_observe.set_defaults(func=cmd_observe)
+
     # tick
     p_tick = subparsers.add_parser("tick", help="Run scheduler tick (the one cron entry)")
     _add_common_args(p_tick)
@@ -2458,7 +2487,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sched_tog = subparsers.add_parser("schedule-toggle", help="Flip the scheduler master switch or a sub-feature")
     p_sched_tog.add_argument(
         "kind",
-        choices=["scheduler", "cycles", "standing-orders", "drives", "dreams"],
+        choices=["scheduler", "cycles", "standing-orders", "drives", "dreams", "observe"],
         help="Which scheduler feature to toggle",
     )
     p_sched_tog.add_argument("state", choices=["on", "off"])

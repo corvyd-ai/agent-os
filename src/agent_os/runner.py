@@ -1574,6 +1574,157 @@ async def run_dream_cycle(
     log.info("dream_done", "Dream cycle finished")
 
 
+# --- Default observation domains (decision-2026-0509-001) ---
+
+_DEFAULT_OBSERVATION_DOMAINS: dict[str, str] = {
+    "agent-000-steward": (
+        "Runtime and governance state.\n"
+        "Check: installed agent-os version (`pip show agent-os`), "
+        "scheduler state file, recent dispatch outcomes in system logs, "
+        "governance documents (decisions, active proposals), "
+        "standing order cadence files, and agent budget status."
+    ),
+    "agent-001-maker": (
+        "Repository and GitHub state.\n"
+        "Check: git status of the main repo and any active worktrees, "
+        "recent commits on main, open branches (agent/* pattern), "
+        "your own task history (in-progress, recent done/failed), "
+        "and the state of any products you've built."
+    ),
+    "agent-003-operator": (
+        "Production systems.\n"
+        "Check: running services and their status, "
+        "recent error logs, disk and resource usage, "
+        "SSL certificate expiry, DNS resolution, "
+        "and any monitoring alerts or anomalies."
+    ),
+    "agent-005-grower": (
+        "External surfaces.\n"
+        "Check: public website availability, "
+        "blog post publication status, "
+        "product landing pages, "
+        "any external-facing URLs or services, "
+        "and content freshness."
+    ),
+    "agent-006-strategist": (
+        "Cross-cutting meta-state.\n"
+        "Check: alignment between current-focus.md and actual task queues, "
+        "proposal status vs. decision pipeline, "
+        "agent working memory staleness (when were they last updated?), "
+        "drive tension levels, and any gaps between strategy and execution."
+    ),
+}
+
+
+def _get_observation_domain(agent_id: str, *, config: Config | None = None) -> str:
+    """Return the observation domain for an agent.
+
+    Priority: config.observation_domains > _DEFAULT_OBSERVATION_DOMAINS > generic fallback.
+    """
+    cfg = config or get_config()
+    # Check config override first
+    if cfg.observation_domains and agent_id in cfg.observation_domains:
+        return cfg.observation_domains[agent_id]
+    # Check built-in defaults
+    if agent_id in _DEFAULT_OBSERVATION_DOMAINS:
+        return _DEFAULT_OBSERVATION_DOMAINS[agent_id]
+    # Generic fallback
+    return (
+        "General observation.\n"
+        "Check: your own task queue (queued, in-progress, recent done/failed), "
+        "your working memory freshness, inbox messages, "
+        "and any state relevant to your role."
+    )
+
+
+async def run_observe_cycle(
+    agent_id: str, *, config: Config | None = None, max_turns: int | None = None, max_budget_usd: float | None = None
+) -> None:
+    """Observe cycle — agents ground themselves in verified reality.
+
+    Per decision-2026-0509-001: observe-cycles record raw tool output
+    (commands + literal results) before any narrative. The observation
+    artifact is the primary record; interpretation happens in subsequent
+    drive cycles.
+
+    Uses a lighter model (Sonnet by default) to keep costs down.
+    """
+    cfg = config or get_config()
+
+    if not _check_budget_gate(agent_id, "observe_cycle", config=cfg):
+        return
+
+    composer = PromptComposer(config=cfg)
+
+    agent_config = load_agent(agent_id, config=cfg)
+    agent_key = agent_config.agent_id
+
+    log = get_logger(agent_key)
+    log.info("observe_start", "Entering observe cycle (reality grounding)")
+
+    try:
+        system_prompt = composer.build_system_prompt(agent_config)
+
+        observation_domain = _get_observation_domain(agent_key, config=cfg)
+        observations_dir = cfg.agents_state_dir
+
+        prompt = composer.render_template(
+            "observe.jinja2",
+            agent_id=agent_key,
+            observation_domain=observation_domain,
+            observations_dir=str(observations_dir),
+        )
+
+        os.environ.pop("CLAUDECODE", None)
+        _ensure_api_key()
+
+        observe_model = cfg.observe_model
+        log.debug("observe_model", f"Observe model: {observe_model}", {"model": observe_model})
+
+        stderr_capture = StderrCapture(agent_key)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            max_turns=max_turns or cfg.observe_max_turns,
+            max_budget_usd=max_budget_usd or cfg.observe_max_budget_usd,
+            model=observe_model,
+            stderr_capture=stderr_capture,
+        )
+
+        result_msg = await _run_query(
+            prompt,
+            options,
+            label=f"observe cycle ({agent_key})",
+            stderr_capture=stderr_capture,
+            max_retries=1,
+        )
+    except Exception as e:
+        stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+        error_refs = _error_classifier.build_error_refs(e.__cause__ or e if e.__cause__ else e, stderr_text)
+        log.error("observe_error", str(e), error_refs)
+        return
+
+    if result_msg:
+        cost = result_msg.total_cost_usd or 0.0
+        aios.log_cost(
+            agent_key,
+            "observe-cycle",
+            cost,
+            result_msg.duration_ms,
+            cfg.observe_model,
+            result_msg.num_turns,
+            config=cfg,
+        )
+        log.info(
+            "observe_complete",
+            f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
+            {"cost_usd": cost, "turns": result_msg.num_turns},
+        )
+
+    log.info("observe_done", "Observe cycle finished")
+
+
 def _emit_jsonl(data: dict) -> None:
     """Print a single JSON line to stdout, flushed. Used by interactive mode."""
     print(json.dumps(data), flush=True)
@@ -2068,6 +2219,7 @@ def main():
     )
     parser.add_argument("--drives", action="store_true", help="Run drive consultation (cron-scheduled or manual)")
     parser.add_argument("--dream", action="store_true", help="Run dream cycle (nightly memory reorganization)")
+    parser.add_argument("--observe", action="store_true", help="Run observe cycle (reality grounding)")
     parser.add_argument(
         "--interactive", action="store_true", help="Interactive conversation mode (reads JSON from stdin)"
     )
@@ -2075,8 +2227,8 @@ def main():
     parser.add_argument("--max-budget", type=float, default=None, help="Override max budget (USD) for this invocation")
     args = parser.parse_args()
 
-    if not any([args.task, args.cycle, args.standing_orders, args.drives, args.dream, args.interactive]):
-        parser.error("Must specify --task, --cycle, --standing-orders, --drives, --dream, or --interactive")
+    if not any([args.task, args.cycle, args.standing_orders, args.drives, args.dream, args.observe, args.interactive]):
+        parser.error("Must specify --task, --cycle, --standing-orders, --drives, --dream, --observe, or --interactive")
 
     overrides = {}
     if args.max_turns is not None:
@@ -2093,6 +2245,8 @@ def main():
         asyncio.run(run_drive_consultation(args.agent, **overrides))
     elif args.dream:
         asyncio.run(run_dream_cycle(args.agent, **overrides))
+    elif args.observe:
+        asyncio.run(run_observe_cycle(args.agent, **overrides))
     elif args.cycle:
         asyncio.run(run_cycle(args.agent, **overrides))
     else:

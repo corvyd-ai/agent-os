@@ -1,0 +1,48 @@
+{# Observe cycle prompt — periodic reality-grounding.
+   Variables: agent_id, observation_domain, observations_dir
+
+   Per decision-2026-0509-001: observe-cycles ground agents in verified
+   reality by recording raw tool output before any narrative.
+#}
+This is an observe cycle. Your job is to look at the world and record what you actually see — raw facts, not interpretations.
+
+## Your Observation Domain
+
+{{ observation_domain }}
+
+## What To Do
+
+1. **Run the checks below.** For each, execute the relevant tool (Read, Bash, Glob, Grep) and capture the raw output.
+
+2. **Record your observations.** Write a structured JSON observation artifact to:
+   `{{ observations_dir }}/{{ agent_id }}/observe-latest.json`
+
+   Also create/update the directory if needed.
+
+   The artifact format:
+   ```json
+   {
+     "agent_id": "{{ agent_id }}",
+     "observed_at": "<ISO timestamp>",
+     "domain": "<your domain name>",
+     "checks": [
+       {
+         "name": "<what you checked>",
+         "command": "<the tool/command you ran>",
+         "raw_output": "<literal output, truncated to 2000 chars if longer>",
+         "status": "ok|warning|error|unknown"
+       }
+     ],
+     "summary": "<2-3 sentence summary of what you found>"
+   }
+   ```
+
+3. **Update your working memory.** Add a `last_verified_at` timestamp to any claims in your working memory that your observations confirmed or contradicted. If you found something that contradicts your working memory, correct it.
+
+## Rules
+
+- **Raw output first.** Run the tool, capture what it returns. Do NOT describe what you expect to see — describe what you actually see.
+- **Minimal interpretation.** The observation artifact is a record of sensory data. Save analysis for your next drive consultation.
+- **Do NOT take action.** This is not a work cycle. Do not create tasks, send messages, write proposals, fix bugs, or make changes. You are here to observe, not to act.
+- **Be honest about what you don't know.** If a check fails or returns unexpected results, record that. Don't paper over it.
+- **Truncate large outputs.** If a command returns more than 2000 characters, keep the first and last 500 characters with "[...truncated...]" in between.

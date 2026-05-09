@@ -198,6 +198,32 @@ def get_dispatch_status(*, config: Config | None = None) -> list[dict]:
             }
         )
 
+        # Observe — cadence-based
+        observe_cadence = cfg.logs_dir / agent_id / ".cadence-scheduler-observe"
+        observe_last = "never"
+        observe_next = "now"
+        if observe_cadence.exists():
+            try:
+                obs_last_dt = datetime.fromisoformat(observe_cadence.read_text().strip())
+                observe_last = obs_last_dt.isoformat()
+                obs_next_dt = obs_last_dt + timedelta(minutes=cfg.schedule_observe_interval_minutes)
+                if obs_next_dt > now:
+                    observe_next = obs_next_dt.isoformat()
+                else:
+                    observe_next = "now"
+            except (ValueError, OSError):
+                pass
+        rows.append(
+            {
+                "agent": agent_id,
+                "cycle_type": "observe",
+                "cadence": f"{cfg.schedule_observe_interval_minutes}m",
+                "last_dispatch": observe_last,
+                "next_eligible": observe_next,
+                "enabled": cfg.schedule_observe_enabled,
+            }
+        )
+
         # Dreams — time-based
         rows.append(
             {

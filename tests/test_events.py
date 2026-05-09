@@ -241,12 +241,13 @@ class TestGetDispatchStatus:
 
         rows = get_dispatch_status(config=cfg)
 
-        # Should have 4 rows per agent (cycle, standing_orders, drives, dreams)
-        assert len(rows) == 4
+        # Should have 5 rows per agent (cycle, standing_orders, drives, observe, dreams)
+        assert len(rows) == 5
         types = [r["cycle_type"] for r in rows]
         assert "cycle" in types
         assert "standing_orders" in types
         assert "drives" in types
+        assert "observe" in types
         assert "dreams" in types
 
         # First run — all should say "never" for last_dispatch

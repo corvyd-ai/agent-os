@@ -126,6 +126,11 @@ class Config:
     schedule_watchdog_alert_threshold_minutes: int = 45
     schedule_watchdog_alert_hook: str = ""
 
+    # Observe cycles — periodic reality-grounding (decision-2026-0509-001)
+    schedule_observe_enabled: bool = True
+    schedule_observe_interval_minutes: int = 360  # ~6 hours default
+    schedule_observe_stagger_minutes: int = 5
+
     # Digest
     schedule_digest_enabled: bool = True
     schedule_digest_time: str = "08:00"
@@ -227,6 +232,16 @@ class Config:
     dream_max_budget_usd: float = 1.50
     dream_max_turns: int = 25
 
+    # Observe cycle
+    observe_model: str = "claude-sonnet-4-6"
+    observe_max_budget_usd: float = 1.00
+    observe_max_turns: int = 20
+
+    # Per-agent observation domains (decision-2026-0509-001)
+    # Keys are agent IDs; values are short domain descriptions.
+    # If empty, a default domain is generated from the agent's role.
+    observation_domains: dict[str, str] = field(default_factory=dict)
+
     # Interactive conversation
     interactive_max_budget_usd: float = 2.00
     interactive_max_turns: int = 30
@@ -277,6 +292,7 @@ class Config:
             "thread_response": "thread_response_max_budget_usd",
             "message_triage": "message_triage_max_budget_usd",
             "dream": "dream_max_budget_usd",
+            "observe": "observe_max_budget_usd",
             "interactive": "interactive_max_budget_usd",
         }
         for toml_key, field_name in budget_map.items():
@@ -366,6 +382,15 @@ class Config:
             kwargs["schedule_watchdog_alert_threshold_minutes"] = int(watchdog["alert_threshold_minutes"])
         if "alert_hook" in watchdog:
             kwargs["schedule_watchdog_alert_hook"] = watchdog["alert_hook"]
+        # [schedule.observe]
+        observe = schedule.get("observe", {})
+        if "enabled" in observe:
+            kwargs["schedule_observe_enabled"] = bool(observe["enabled"])
+        if "interval_minutes" in observe:
+            kwargs["schedule_observe_interval_minutes"] = int(observe["interval_minutes"])
+        if "stagger_minutes" in observe:
+            kwargs["schedule_observe_stagger_minutes"] = int(observe["stagger_minutes"])
+
         digest = maint.get("digest", {})
         if "enabled" in digest:
             kwargs["schedule_digest_enabled"] = bool(digest["enabled"])
@@ -410,6 +435,13 @@ class Config:
         update = data.get("update", {})
         if "source" in update:
             kwargs["update_source"] = str(update["source"])
+
+        # [observe]
+        observe_cfg = data.get("observe", {})
+        if "model" in observe_cfg:
+            kwargs["observe_model"] = observe_cfg["model"]
+        if "domains" in observe_cfg:
+            kwargs["observation_domains"] = dict(observe_cfg["domains"])
 
         # [roles]
         roles = data.get("roles", {})
@@ -787,6 +819,9 @@ _COMPAT_MAP: dict[str, str] = {
     "DREAM_MODEL": "dream_model",
     "DREAM_MAX_BUDGET_USD": "dream_max_budget_usd",
     "DREAM_MAX_TURNS": "dream_max_turns",
+    "OBSERVE_MODEL": "observe_model",
+    "OBSERVE_MAX_BUDGET_USD": "observe_max_budget_usd",
+    "OBSERVE_MAX_TURNS": "observe_max_turns",
     "INTERACTIVE_MAX_BUDGET_USD": "interactive_max_budget_usd",
     "INTERACTIVE_MAX_TURNS": "interactive_max_turns",
 }
