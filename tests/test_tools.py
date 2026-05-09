@@ -90,3 +90,27 @@ def test_complete_task_tool_default_mode_moves_to_done(aios_fs):
     assert not response.get("is_error")
     assert list(aios_fs["TASKS_DONE"].glob("task-2026-0101-002*"))
     assert not list(aios_fs["TASKS_IN_PROGRESS"].glob("task-2026-0101-002*"))
+
+
+def _seed_in_review_task(aios_fs, task_id):
+    """Put a task into in-review/ as if submit_for_review had run."""
+    meta = {
+        "id": task_id,
+        "title": f"Task {task_id}",
+        "status": "in-review",
+        "priority": "medium",
+        "assigned_to": "agent-001-maker",
+    }
+    _write_frontmatter(aios_fs["TASKS_IN_REVIEW"] / f"{task_id}.md", meta, "body")
+
+
+def test_complete_task_tool_from_in_review(aios_fs):
+    """MCP complete_task tool should handle in-review/ -> done/ transition."""
+    _seed_in_review_task(aios_fs, "task-2026-0101-003")
+
+    tools = build_aios_tools(agent_id="agent-001-maker")
+    response = asyncio.run(_handler(tools, "complete_task")({"task_id": "task-2026-0101-003"}))
+
+    assert not response.get("is_error")
+    assert list(aios_fs["TASKS_DONE"].glob("task-2026-0101-003*"))
+    assert not list(aios_fs["TASKS_IN_REVIEW"].glob("task-2026-0101-003*"))
