@@ -779,10 +779,14 @@ def _update_from_wheel(args) -> None:
             print("Aborted.")
             return
 
-    # Download wheel to a temp file, install, then clean up
+    # Download wheel to a temp directory using the original filename.
+    # pip 26+ validates wheel filenames strictly — a temp-style name like
+    # "tmpXXXXXX.whl" is rejected as an invalid wheel.  Using the real
+    # wheel_name (e.g. "agent_os-0.5.3-py3-none-any.whl") satisfies the
+    # parser.  The enclosing TemporaryDirectory handles cleanup.
     print(f"\nDownloading {wheel_name}...")
-    with tempfile.NamedTemporaryFile(suffix=".whl", delete=False) as tmp:
-        wheel_path = Path(tmp.name)
+    tmpdir = tempfile.mkdtemp(prefix="agent-os-update-")
+    wheel_path = Path(tmpdir) / wheel_name
     try:
         try:
             req = urllib.request.Request(wheel_url, headers={"User-Agent": "agent-os-update"})
@@ -813,9 +817,10 @@ def _update_from_wheel(args) -> None:
             sys.exit(1)
     finally:
         import contextlib
+        import shutil
 
         with contextlib.suppress(OSError):
-            wheel_path.unlink()
+            shutil.rmtree(tmpdir)
 
     # Re-read installed version from a subprocess so we see the new code
     r = subprocess.run(
