@@ -153,6 +153,12 @@ def get_dispatch_status(*, config: Config | None = None) -> list[dict]:
             cfg.schedule_standing_orders_interval_minutes,
             cfg.schedule_standing_orders_enabled,
         ),
+        (
+            "observe",
+            "scheduler-observe",
+            cfg.schedule_observe_interval_minutes,
+            cfg.schedule_observe_enabled,
+        ),
     ]
 
     for agent_id in agent_ids:

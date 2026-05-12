@@ -1574,6 +1574,96 @@ async def run_dream_cycle(
     log.info("dream_done", "Dream cycle finished")
 
 
+async def run_observe_cycle(
+    agent_id: str, *, config: Config | None = None, max_turns: int | None = None, max_budget_usd: float | None = None
+) -> None:
+    """Observe-cycle — agents look at reality and record structured artifacts.
+
+    Produces a JSON observation artifact at state/{agent}/observations/.
+    Uses a lighter model (Sonnet) since observation is mechanical, not creative.
+    No narrative — structured data in, structured data out.
+    """
+    cfg = config or get_config()
+
+    if not _check_budget_gate(agent_id, "observe_cycle", config=cfg):
+        return
+
+    from .observations import get_observation_domain, prune_observations
+
+    composer = PromptComposer(config=cfg)
+
+    agent_config = load_agent(agent_id, config=cfg)
+    agent_key = agent_config.agent_id
+
+    log = get_logger(agent_key)
+    log.info("observe_start", "Entering observe cycle (reality grounding)")
+
+    # Prune old observations before creating new ones
+    try:
+        pruned = prune_observations(agent_key, retention_days=cfg.observe_retention_days, config=cfg)
+        if pruned:
+            log.info("observe_pruned", f"Pruned {pruned} old observation(s)", {"pruned": pruned})
+    except Exception as e:
+        log.warn("observe_prune_error", f"Failed to prune observations: {e}")
+
+    domain = get_observation_domain(agent_key)
+    obs_store_path = f"agents/state/{agent_key}/observations"
+
+    try:
+        system_prompt = composer.build_system_prompt(agent_config)
+
+        prompt = composer.render_template(
+            "observe.jinja2",
+            agent_id=agent_key,
+            domain_name=domain["name"],
+            domain_description=domain["description"],
+            observation_store_path=obs_store_path,
+        )
+
+        os.environ.pop("CLAUDECODE", None)
+        _ensure_api_key()
+
+        observe_model = cfg.observe_model
+        log.debug("observe_model", f"Observe model: {observe_model}", {"model": observe_model})
+
+        stderr_capture = StderrCapture(agent_key)
+        options = _make_options(
+            agent_config,
+            system_prompt,
+            config=cfg,
+            max_turns=max_turns or cfg.observe_max_turns,
+            max_budget_usd=max_budget_usd or cfg.observe_max_budget_usd,
+            model=observe_model,
+            stderr_capture=stderr_capture,
+        )
+
+        result_msg = await _run_query(
+            prompt,
+            options,
+            label=f"observe cycle ({agent_key})",
+            stderr_capture=stderr_capture,
+            max_retries=1,
+        )
+    except Exception as e:
+        stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
+        error_refs = _error_classifier.build_error_refs(e.__cause__ or e if e.__cause__ else e, stderr_text)
+        log.error("observe_error", str(e), error_refs)
+        return
+
+    if result_msg:
+        cost = result_msg.total_cost_usd or 0.0
+        aios.log_cost(
+            agent_key, "observe-cycle", cost, result_msg.duration_ms, observe_model, result_msg.num_turns, config=cfg
+        )
+        log.info(
+            "observe_complete",
+            f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
+            {"cost_usd": cost, "turns": result_msg.num_turns},
+        )
+
+    log.info("observe_done", "Observe cycle finished")
+
+
 def _emit_jsonl(data: dict) -> None:
     """Print a single JSON line to stdout, flushed. Used by interactive mode."""
     print(json.dumps(data), flush=True)

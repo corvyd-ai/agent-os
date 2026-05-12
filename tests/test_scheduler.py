@@ -354,6 +354,7 @@ def _make_minimal_cfg(tmp_path, **overrides):
         schedule_standing_orders_enabled=False,
         schedule_drives_enabled=False,
         schedule_dreams_enabled=False,
+        schedule_observe_enabled=False,
         schedule_archive_enabled=False,
         schedule_manifest_enabled=False,
         schedule_watchdog_enabled=False,

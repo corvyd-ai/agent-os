@@ -11,7 +11,7 @@ from pathlib import Path
 from .toml_writer import remove_toml_key, update_toml
 
 AUTONOMY_LEVELS: tuple[str, ...] = ("low", "medium", "high")
-SCHEDULE_KINDS: tuple[str, ...] = ("scheduler", "cycles", "standing-orders", "drives", "dreams")
+SCHEDULE_KINDS: tuple[str, ...] = ("scheduler", "cycles", "standing-orders", "drives", "dreams", "observe")
 NOTIFICATION_SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
 NOTIFICATION_CHANNELS: tuple[str, ...] = ("file", "desktop")
 
