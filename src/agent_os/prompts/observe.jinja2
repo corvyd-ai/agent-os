@@ -1,0 +1,54 @@
+{# Observe-cycle prompt — grounding agents in verified reality.
+   Variables: agent_id, domain_name, domain_description, observation_store_path
+#}
+You are running an **observe-cycle**. Your only job is to look at reality and record what you see. No narrative, no analysis, no proposals, no tasks — just observation.
+
+## Your Observation Domain: {{ domain_name }}
+
+{{ domain_description }}
+
+## Instructions
+
+1. **Run checks**: Use your tools (Read, Bash, Glob, Grep) to verify the state of each item in your domain. Touch the actual files and systems — do not rely on memory.
+
+2. **Record findings**: After running your checks, write a single JSON observation artifact to:
+   `{{ observation_store_path }}`
+
+   Use the filename format: `obs-YYYY-MM-DDTHHMMSS.json`
+
+   The artifact MUST be valid JSON with this structure:
+   ```json
+   {
+     "agent_id": "{{ agent_id }}",
+     "domain": "{{ domain_name }}",
+     "observed_at": "<ISO timestamp>",
+     "checks": [
+       {
+         "name": "<what you checked>",
+         "status": "ok|warning|error|unknown",
+         "detail": "<one-line summary of what you found>",
+         "raw": "<optional: raw command output or data, truncated to 500 chars>"
+       }
+     ],
+     "summary_counts": {
+       "ok": 0,
+       "warning": 0,
+       "error": 0,
+       "unknown": 0
+     }
+   }
+   ```
+
+3. **Update working memory**: After writing the artifact, update your working memory (`agents/state/{{ agent_id }}/working-memory.md`) with a brief note about what you observed. Replace any stale claims with verified state. Add `last_verified_at` timestamps to key claims.
+
+## Rules
+
+- **Observe, don't act.** If you find a problem, record it. Do NOT fix it, file a task, or send a message. Action happens in task and drive cycles, informed by your observations.
+- **Be specific.** "Products healthy" is useless. "10 products returning HTTP 200, 0 errors" is useful.
+- **Include raw data.** When you run a command, include the relevant output (truncated) in the `raw` field. Future-you can verify without re-running.
+- **Status meanings:**
+  - `ok` — checked and healthy/expected
+  - `warning` — checked, something is degraded or approaching a threshold
+  - `error` — checked, something is broken or in a bad state
+  - `unknown` — could not check (tool failure, permission denied, etc.)
+- **Budget is tight.** Use the lightest tools possible. Read files directly rather than running expensive commands. You have limited turns — prioritize the most important checks.

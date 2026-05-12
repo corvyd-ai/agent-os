@@ -107,9 +107,10 @@ class PromptComposer:
         7. Inbox awareness
         8. Broadcasts (Layer 2)
         9. System notes (filtered by feedback_routing config)
-        10. Recent task failures (own failures; all-agent view for Steward)
-        11. Quality gates (builder agents only)
-        12. Task context (if present)
+        10. Latest observation (from observe-cycles)
+        11. Recent task failures (own failures; all-agent view for Steward)
+        12. Quality gates (builder agents only)
+        13. Task context (if present)
         """
         cfg = self.config
         today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
@@ -235,12 +236,17 @@ class PromptComposer:
                     ),
                 )
 
-        # 10. Recent task failures
+        # 10. Latest observation (from observe-cycles)
+        observation_section = self._build_observation_section(agent_config, cfg)
+        if observation_section:
+            yield "latest_observation", observation_section
+
+        # 11. Recent task failures
         failure_section = self._build_failure_section(agent_config, cfg)
         if failure_section:
             yield "recent_failures", failure_section
 
-        # 11. Quality gates / workspace validation (builder agents only)
+        # 12. Quality gates / workspace validation (builder agents only)
         if self.should_include_section("quality_gates", agent_config):
             if workspace_branch and workspace_code_dir and cfg.project_validate_commands:
                 yield (
@@ -261,9 +267,35 @@ class PromptComposer:
                     ),
                 )
 
-        # 12. Task context
+        # 13. Task context
         if task_context:
             yield "task_context", (f"# Current Task\n\nYou have been assigned the following task:\n\n{task_context}")
+
+    # --- Observation injection helpers ---
+
+    @staticmethod
+    def _build_observation_section(agent_config: AgentConfig, cfg: Config) -> str | None:
+        """Build the latest-observation prompt section.
+
+        Injects the most recent observation artifact into the briefing so the
+        agent sees verified state rather than remembered state.
+
+        Returns ``None`` when no observations exist for this agent.
+        """
+        from .observations import format_observation_for_briefing, load_latest_observation
+
+        observation = load_latest_observation(agent_config.agent_id, config=cfg)
+        if not observation:
+            return None
+
+        formatted = format_observation_for_briefing(observation)
+        return (
+            "# Latest Observation\n\n"
+            "The following was recorded during your most recent observe-cycle. "
+            "This is verified state — prefer it over anything in your working memory "
+            "that contradicts it.\n\n"
+            + formatted
+        )
 
     # --- Failure injection helpers ---
 

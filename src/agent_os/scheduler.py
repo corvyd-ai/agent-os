@@ -461,6 +461,52 @@ async def tick(*, config: Config | None = None) -> TickResult:
                     lock.close()
                 result.dispatched.append(record)
 
+    # --- Observe cycles ---
+    # Cadence-based, one agent per tick (same rationale as task cycles).
+    # Observe-cycles are NOT gated by operating hours — they run 24/7 since
+    # observations are cheap (Sonnet model) and the data is needed regardless
+    # of when the agent next wakes up for "real" work.
+    if cfg.schedule_observes_enabled:
+        for agent_id in agent_ids:
+            cadence_name = "scheduler-observe"
+            if _is_cadence_due(agent_id, cadence_name, cfg.schedule_observes_interval_minutes, config=cfg):
+                lock = acquire_lock(agent_id, "observe", config=cfg)
+                if lock is None:
+                    result.skipped.append(f"observe:{agent_id} locked")
+                    _record_dispatch_outcome(agent_id, "observe", "locked", config=cfg)
+                    continue
+
+                record = DispatchRecord(type="observe", agent=agent_id, at=now_iso)
+                started = _now(config=cfg)
+                try:
+                    get_logger("system").info(
+                        "tick_dispatch",
+                        f"Dispatching observe cycle for {agent_id}",
+                        {"type": "observe", "agent": agent_id},
+                    )
+                    await runner.run_observe_cycle(agent_id, config=cfg)
+                    record.result = "done"
+                    _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
+                    get_logger("system").info(
+                        "dispatch_complete",
+                        f"Completed observe cycle for {agent_id}",
+                        {"type": "observe", "agent": agent_id},
+                    )
+                    _record_dispatch_outcome(agent_id, "observe", "success", started_at=started, config=cfg)
+                except Exception as e:
+                    record.result = f"error: {e}"
+                    get_logger("system").error(
+                        "dispatch_error",
+                        f"Error in observe for {agent_id}: {e}",
+                        {"type": "observe", "agent": agent_id},
+                    )
+                    _record_dispatch_outcome(agent_id, "observe", "error", started_at=started, error=str(e), config=cfg)
+                    _mark_scheduler_cadence(agent_id, cadence_name, config=cfg)
+                finally:
+                    lock.close()
+                result.dispatched.append(record)
+                break  # One agent per tick
+
     # --- Dream cycles ---
     # Each agent's dream fires at dream_time + (index * stagger_minutes).
     # We check each agent independently so that staggered agents fire at
@@ -619,6 +665,9 @@ def get_schedule_status(*, config: Config | None = None) -> str:
     )
     lines.append(
         f" *Drives:          {'ON' if cfg.schedule_drives_enabled else 'OFF'} (weekday: {', '.join(cfg.schedule_drives_weekday_times)}, weekend: {', '.join(cfg.schedule_drives_weekend_times)}, stagger {cfg.schedule_drives_stagger_minutes}m)"
+    )
+    lines.append(
+        f"  Observes:        {'ON' if cfg.schedule_observes_enabled else 'OFF'} (every {cfg.schedule_observes_interval_minutes}m, stagger {cfg.schedule_observes_stagger_minutes}m)"
     )
     lines.append(
         f"  Dreams:          {'ON' if cfg.schedule_dreams_enabled else 'OFF'} (at {cfg.schedule_dreams_time}, stagger {cfg.schedule_dreams_stagger_minutes}m)"

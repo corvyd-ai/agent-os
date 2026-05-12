@@ -116,6 +116,10 @@ class Config:
     schedule_dreams_enabled: bool = True
     schedule_dreams_time: str = "02:00"
     schedule_dreams_stagger_minutes: int = 10
+    # Observe cycles
+    schedule_observes_enabled: bool = True
+    schedule_observes_interval_minutes: int = 360  # every 6 hours
+    schedule_observes_stagger_minutes: int = 5
     # Maintenance sub-schedules
     schedule_archive_enabled: bool = True
     schedule_archive_time: str = "03:00"
@@ -230,6 +234,12 @@ class Config:
     dream_max_budget_usd: float = 1.50
     dream_max_turns: int = 25
 
+    # Observe cycle
+    observe_model: str = "claude-sonnet-4-6"
+    observe_max_budget_usd: float = 0.50
+    observe_max_turns: int = 15
+    observe_retention_days: int = 7
+
     # Interactive conversation
     interactive_max_budget_usd: float = 2.00
     interactive_max_turns: int = 30
@@ -280,6 +290,7 @@ class Config:
             "thread_response": "thread_response_max_budget_usd",
             "message_triage": "message_triage_max_budget_usd",
             "dream": "dream_max_budget_usd",
+            "observe": "observe_max_budget_usd",
             "interactive": "interactive_max_budget_usd",
         }
         for toml_key, field_name in budget_map.items():
@@ -348,6 +359,15 @@ class Config:
         if "stagger_minutes" in dreams:
             kwargs["schedule_dreams_stagger_minutes"] = int(dreams["stagger_minutes"])
 
+        # [schedule.observes]
+        observes = schedule.get("observes", {})
+        if "enabled" in observes:
+            kwargs["schedule_observes_enabled"] = bool(observes["enabled"])
+        if "interval_minutes" in observes:
+            kwargs["schedule_observes_interval_minutes"] = int(observes["interval_minutes"])
+        if "stagger_minutes" in observes:
+            kwargs["schedule_observes_stagger_minutes"] = int(observes["stagger_minutes"])
+
         # [schedule.maintenance]
         maint = schedule.get("maintenance", {})
         archive = maint.get("archive", {})
@@ -410,6 +430,8 @@ class Config:
             kwargs["runtime_user"] = runtime["user"]
         if "env_file" in runtime:
             kwargs["runtime_env_file"] = runtime["env_file"]
+        if "observe_model" in runtime:
+            kwargs["observe_model"] = runtime["observe_model"]
 
         # [update]
         update = data.get("update", {})
@@ -792,6 +814,9 @@ _COMPAT_MAP: dict[str, str] = {
     "DREAM_MODEL": "dream_model",
     "DREAM_MAX_BUDGET_USD": "dream_max_budget_usd",
     "DREAM_MAX_TURNS": "dream_max_turns",
+    "OBSERVE_MODEL": "observe_model",
+    "OBSERVE_MAX_BUDGET_USD": "observe_max_budget_usd",
+    "OBSERVE_MAX_TURNS": "observe_max_turns",
     "INTERACTIVE_MAX_BUDGET_USD": "interactive_max_budget_usd",
     "INTERACTIVE_MAX_TURNS": "interactive_max_turns",
 }
