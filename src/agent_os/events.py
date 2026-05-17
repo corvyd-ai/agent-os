@@ -63,6 +63,36 @@ class CycleOutcomeEvent:
 
 
 @dataclass(frozen=True)
+class DreamOutcomeEvent:
+    """Emitted when a dream cycle ends.
+
+    Tracks whether the dream's cognitive artifacts (journal, working memory)
+    were actually modified — catching the "partial failure masquerading as
+    health" pattern where the SDK session succeeds but key steps are silently
+    skipped (e.g., agent runs out of turns before journaling).
+    """
+
+    agent: str
+    process_status: str  # "completed", "error", "max_turns"
+    journal_updated: bool  # Did journal.md get modified during the cycle?
+    working_memory_updated: bool  # Did working-memory.md get modified?
+    failure_reason: str = ""
+    cost_usd: float = 0.0
+    num_turns: int = 0
+
+    def to_dict(self) -> dict:
+        """Serialize to a dict, omitting empty optional fields."""
+        d = {"event": "dream_outcome"}
+        for k, v in asdict(self).items():
+            if v is not None and v != "" and v != 0 and v != 0.0:
+                d[k] = v
+        # Always include booleans (even if False — that's the interesting signal)
+        d["journal_updated"] = self.journal_updated
+        d["working_memory_updated"] = self.working_memory_updated
+        return d
+
+
+@dataclass(frozen=True)
 class DispatchSkippedEvent:
     """Emitted when the scheduler evaluates an agent and decides not to fire.
 
@@ -99,6 +129,33 @@ def emit_cycle_outcome(event: CycleOutcomeEvent, *, config: Config | None = None
         level,
         "cycle_outcome",
         f"Cycle outcome: process={event.process_status} artifact={event.artifact_status}",
+        event_dict,
+    )
+
+
+def emit_dream_outcome(event: DreamOutcomeEvent, *, config: Config | None = None) -> None:
+    """Log a dream outcome event to the agent's JSONL log.
+
+    Warns when journal or working memory weren't updated — that's the
+    silent-failure signal this event exists to surface.
+    """
+    cfg = config or get_config()
+    log = get_logger(event.agent, config=cfg)
+
+    event_dict = event.to_dict()
+    event_dict.setdefault("timestamp", datetime.now(cfg.tz).isoformat())
+
+    is_healthy = event.process_status == "completed" and event.journal_updated and event.working_memory_updated
+    level = "info" if is_healthy else "warn"
+
+    log._write(
+        level,
+        "dream_outcome",
+        (
+            f"Dream outcome: process={event.process_status} "
+            f"journal={'yes' if event.journal_updated else 'MISSING'} "
+            f"wm={'yes' if event.working_memory_updated else 'MISSING'}"
+        ),
         event_dict,
     )
 

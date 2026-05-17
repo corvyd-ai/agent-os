@@ -60,6 +60,8 @@ KNOWN_EVENT_TYPES: dict[str, str] = {
     "cycle_outcome": "Structured event emitted when a task cycle ends, separating process status from artifact status.",
     "dispatch_skipped": "Emitted when the scheduler evaluates an agent and decides not to fire (with reason).",
     "task_requeued_stale_claim": "A task stuck in in-progress/ with no recent agent activity was automatically moved back to queued/.",
+    "dream_journal_missing": "Dream cycle completed but the journal was not updated — Step 6 of the dream prompt was silently skipped.",
+    "dream_outcome": "Structured event emitted when a dream cycle ends, tracking whether journal and working memory were updated.",
 }
 
 

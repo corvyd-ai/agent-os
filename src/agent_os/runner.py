@@ -1508,14 +1508,32 @@ async def run_drive_consultation(
     log.info("drive_consultation_done", "Drive consultation finished")
 
 
+def _get_file_mtime(path: Path) -> float:
+    """Return a file's mtime, or 0.0 if it doesn't exist."""
+    try:
+        return path.stat().st_mtime
+    except (OSError, FileNotFoundError):
+        return 0.0
+
+
 async def run_dream_cycle(
     agent_id: str, *, config: Config | None = None, max_turns: int | None = None, max_budget_usd: float | None = None
 ) -> None:
-    """Nightly dream cycle — agents reorganize their memory state."""
+    """Nightly dream cycle — agents reorganize their memory state.
+
+    Captures file modification times before the SDK call and verifies
+    afterward that journal and working memory were actually updated.
+    This catches the "partial failure masquerading as health" pattern
+    where the agent session succeeds but key cognitive steps are silently
+    skipped (e.g., agent exhausts turns before reaching the journal step).
+    """
     cfg = config or get_config()
 
     if not _check_budget_gate(agent_id, "dream_cycle", config=cfg):
         return
+
+    from .events import DreamOutcomeEvent, emit_dream_outcome
+    from .notifications import NotificationEvent, send_notification
 
     composer = PromptComposer(config=cfg)
 
@@ -1524,6 +1542,13 @@ async def run_dream_cycle(
 
     log = get_logger(agent_key)
     log.info("dream_start", "Entering dream cycle (nightly memory reorganization)")
+
+    # --- Snapshot file state before the dream ---
+    journal_path = cfg.logs_dir / agent_key / "journal.md"
+    wm_path = cfg.agents_state_dir / agent_key / "working-memory.md"
+
+    journal_mtime_before = _get_file_mtime(journal_path)
+    wm_mtime_before = _get_file_mtime(wm_path)
 
     try:
         system_prompt = composer.build_system_prompt(agent_config)
@@ -1558,17 +1583,95 @@ async def run_dream_cycle(
         stderr_text = stderr_capture.text if "stderr_capture" in dir() else ""
         error_refs = _error_classifier.build_error_refs(e.__cause__ or e if e.__cause__ else e, stderr_text)
         log.error("dream_error", str(e), error_refs)
+
+        emit_dream_outcome(
+            DreamOutcomeEvent(
+                agent=agent_key,
+                process_status="error",
+                journal_updated=_get_file_mtime(journal_path) > journal_mtime_before,
+                working_memory_updated=_get_file_mtime(wm_path) > wm_mtime_before,
+                failure_reason=str(e)[:500],
+            ),
+            config=cfg,
+        )
         return
+
+    # --- Post-dream verification ---
+    journal_updated = _get_file_mtime(journal_path) > journal_mtime_before
+    wm_updated = _get_file_mtime(wm_path) > wm_mtime_before
+
+    cost = 0.0
+    num_turns = 0
+    process_status = "completed"
+    failure_reason = ""
 
     if result_msg:
         cost = result_msg.total_cost_usd or 0.0
-        aios.log_cost(
-            agent_key, "dream-cycle", cost, result_msg.duration_ms, dream_model, result_msg.num_turns, config=cfg
-        )
+        num_turns = result_msg.num_turns
+        aios.log_cost(agent_key, "dream-cycle", cost, result_msg.duration_ms, dream_model, num_turns, config=cfg)
         log.info(
             "dream_complete",
-            f"Done: ${cost:.4f}, {result_msg.num_turns} turns",
-            {"cost_usd": cost, "turns": result_msg.num_turns},
+            f"Done: ${cost:.4f}, {num_turns} turns",
+            {"cost_usd": cost, "turns": num_turns},
+        )
+
+        if result_msg.is_error:
+            subtype = result_msg.subtype or ""
+            if subtype == "error_max_turns":
+                process_status = "max_turns"
+                failure_reason = f"Hit turn limit ({num_turns} turns)"
+                log.warn(
+                    "dream_max_turns",
+                    f"Dream hit turn limit ({num_turns} turns) — journal may be incomplete",
+                    {"turns": num_turns},
+                )
+            else:
+                process_status = "error"
+                failure_reason = result_msg.result or f"Agent error (subtype={subtype})"
+                log.error(
+                    "dream_agent_error",
+                    f"Dream cycle agent error (subtype={subtype})",
+                    {"subtype": subtype},
+                )
+
+    # --- Emit structured outcome event ---
+    emit_dream_outcome(
+        DreamOutcomeEvent(
+            agent=agent_key,
+            process_status=process_status,
+            journal_updated=journal_updated,
+            working_memory_updated=wm_updated,
+            failure_reason=failure_reason,
+            cost_usd=cost,
+            num_turns=num_turns,
+        ),
+        config=cfg,
+    )
+
+    # --- Alert on missing journal (the specific failure this was built to catch) ---
+    if not journal_updated and process_status != "error":
+        log.warn(
+            "dream_journal_missing",
+            f"Dream cycle completed but journal was NOT updated for {agent_key}",
+            {"agent": agent_key, "process_status": process_status, "turns": num_turns},
+        )
+        send_notification(
+            NotificationEvent(
+                event_type="dream_journal_missing",
+                severity="warning",
+                title=f"Dream journal missing for {agent_key}",
+                detail=(
+                    f"Dream cycle for {agent_key} finished (process={process_status}, "
+                    f"{num_turns} turns, ${cost:.4f}) but the journal at "
+                    f"`{journal_path}` was not updated. This means Step 6 of the "
+                    f"dream prompt was silently skipped — the agent likely ran out "
+                    f"of turns or budget before reaching the journaling step.\n\n"
+                    f"Working memory {'was' if wm_updated else 'was NOT'} updated."
+                ),
+                agent_id=agent_key,
+                refs={"process_status": process_status, "turns": num_turns, "cost_usd": cost},
+            ),
+            config=cfg,
         )
 
     log.info("dream_done", "Dream cycle finished")

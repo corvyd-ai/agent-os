@@ -10,8 +10,10 @@ from agent_os.config import Config
 from agent_os.events import (
     CycleOutcomeEvent,
     DispatchSkippedEvent,
+    DreamOutcomeEvent,
     emit_cycle_outcome,
     emit_dispatch_skipped,
+    emit_dream_outcome,
     format_dispatch_status,
     get_dispatch_status,
 )
@@ -202,6 +204,148 @@ class TestEmitDispatchSkipped:
         assert entries[0]["level"] == "info"
         assert entries[0]["refs"]["event"] == "dispatch_skipped"
         assert entries[0]["refs"]["reason"] == "cooldown_active"
+
+
+# --- DreamOutcomeEvent ---
+
+
+class TestDreamOutcomeEvent:
+    def test_to_dict_includes_event_field(self):
+        event = DreamOutcomeEvent(
+            agent="agent-003-operator",
+            process_status="completed",
+            journal_updated=True,
+            working_memory_updated=True,
+            cost_usd=1.23,
+            num_turns=20,
+        )
+        d = event.to_dict()
+        assert d["event"] == "dream_outcome"
+        assert d["agent"] == "agent-003-operator"
+        assert d["process_status"] == "completed"
+        assert d["journal_updated"] is True
+        assert d["working_memory_updated"] is True
+
+    def test_to_dict_always_includes_booleans_even_when_false(self):
+        """The whole point: False booleans are the interesting signal."""
+        event = DreamOutcomeEvent(
+            agent="agent-003-operator",
+            process_status="completed",
+            journal_updated=False,
+            working_memory_updated=True,
+        )
+        d = event.to_dict()
+        assert d["journal_updated"] is False
+        assert d["working_memory_updated"] is True
+
+    def test_to_dict_omits_zero_cost_and_turns(self):
+        event = DreamOutcomeEvent(
+            agent="agent-001",
+            process_status="error",
+            journal_updated=False,
+            working_memory_updated=False,
+            failure_reason="SDK crashed",
+        )
+        d = event.to_dict()
+        assert "cost_usd" not in d
+        assert "num_turns" not in d
+        assert d["failure_reason"] == "SDK crashed"
+
+    def test_to_dict_is_json_serializable(self):
+        event = DreamOutcomeEvent(
+            agent="agent-001",
+            process_status="max_turns",
+            journal_updated=False,
+            working_memory_updated=True,
+            cost_usd=1.50,
+            num_turns=25,
+        )
+        json.dumps(event.to_dict())
+
+    def test_to_dict_includes_cost_and_turns_when_nonzero(self):
+        event = DreamOutcomeEvent(
+            agent="agent-001",
+            process_status="completed",
+            journal_updated=True,
+            working_memory_updated=True,
+            cost_usd=0.87,
+            num_turns=15,
+        )
+        d = event.to_dict()
+        assert d["cost_usd"] == 0.87
+        assert d["num_turns"] == 15
+
+
+class TestEmitDreamOutcome:
+    def test_healthy_dream_logs_as_info(self, aios_config):
+        """All steps completed → info level."""
+        event = DreamOutcomeEvent(
+            agent="agent-003-operator",
+            process_status="completed",
+            journal_updated=True,
+            working_memory_updated=True,
+            cost_usd=1.00,
+            num_turns=18,
+        )
+        emit_dream_outcome(event, config=aios_config)
+
+        log_dir = aios_config.logs_dir / "agent-003-operator"
+        log_files = list(log_dir.glob("*.jsonl"))
+        assert len(log_files) == 1
+
+        entries = [json.loads(line) for line in log_files[0].read_text().splitlines()]
+        assert len(entries) == 1
+        assert entries[0]["action"] == "dream_outcome"
+        assert entries[0]["level"] == "info"
+        assert entries[0]["refs"]["event"] == "dream_outcome"
+        assert entries[0]["refs"]["journal_updated"] is True
+
+    def test_missing_journal_logs_as_warn(self, aios_config):
+        """Journal not updated → warn level (the silent failure we're catching)."""
+        event = DreamOutcomeEvent(
+            agent="agent-003-operator",
+            process_status="completed",
+            journal_updated=False,
+            working_memory_updated=True,
+        )
+        emit_dream_outcome(event, config=aios_config)
+
+        log_dir = aios_config.logs_dir / "agent-003-operator"
+        log_files = list(log_dir.glob("*.jsonl"))
+        entries = [json.loads(line) for line in log_files[0].read_text().splitlines()]
+        assert entries[0]["level"] == "warn"
+        assert "MISSING" in entries[0]["detail"]
+
+    def test_missing_working_memory_logs_as_warn(self, aios_config):
+        """Working memory not updated → warn level."""
+        event = DreamOutcomeEvent(
+            agent="agent-003-operator",
+            process_status="completed",
+            journal_updated=True,
+            working_memory_updated=False,
+        )
+        emit_dream_outcome(event, config=aios_config)
+
+        log_dir = aios_config.logs_dir / "agent-003-operator"
+        log_files = list(log_dir.glob("*.jsonl"))
+        entries = [json.loads(line) for line in log_files[0].read_text().splitlines()]
+        assert entries[0]["level"] == "warn"
+
+    def test_error_status_logs_as_warn(self, aios_config):
+        """Process error → warn level regardless of artifact state."""
+        event = DreamOutcomeEvent(
+            agent="agent-003-operator",
+            process_status="error",
+            journal_updated=False,
+            working_memory_updated=False,
+            failure_reason="SDK crashed",
+        )
+        emit_dream_outcome(event, config=aios_config)
+
+        log_dir = aios_config.logs_dir / "agent-003-operator"
+        log_files = list(log_dir.glob("*.jsonl"))
+        entries = [json.loads(line) for line in log_files[0].read_text().splitlines()]
+        assert entries[0]["level"] == "warn"
 
 
 # --- dispatch-status ---

@@ -17,6 +17,7 @@ from agent_os.runner import (
     _compute_expected_at,
     _ensure_api_key,
     _find_product_code_dir,
+    _get_file_mtime,
     _streaming_prompt,
 )
 
@@ -292,6 +293,36 @@ async def test_streaming_prompt_format():
     assert messages[0]["type"] == "user"
     assert messages[0]["message"]["role"] == "user"
     assert messages[0]["message"]["content"] == "Hello, agent"
+
+
+# ── File mtime helper (dream verification) ─────────────────────────
+
+
+def test_get_file_mtime_existing_file(tmp_path):
+    """Returns mtime for files that exist."""
+    f = tmp_path / "journal.md"
+    f.write_text("## 2026-05-10 — Dream Cycle\n\nSomething happened.\n")
+    mtime = _get_file_mtime(f)
+    assert mtime > 0
+
+
+def test_get_file_mtime_missing_file(tmp_path):
+    """Returns 0.0 for files that don't exist."""
+    f = tmp_path / "nonexistent.md"
+    assert _get_file_mtime(f) == 0.0
+
+
+def test_get_file_mtime_detects_modification(tmp_path):
+    """mtime increases when file is modified."""
+    import time
+
+    f = tmp_path / "journal.md"
+    f.write_text("entry 1")
+    mtime_before = _get_file_mtime(f)
+    time.sleep(0.05)  # Ensure filesystem mtime granularity
+    f.write_text("entry 1\nentry 2")
+    mtime_after = _get_file_mtime(f)
+    assert mtime_after > mtime_before
 
 
 # ── Cycle classification ────────────────────────────────────────────
